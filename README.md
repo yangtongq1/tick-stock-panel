@@ -35,6 +35,14 @@
 
 **[✨ 核心功能](#-核心功能)** · **[📸 界面预览](#-界面预览)** · **[🏛️ 架构](#%EF%B8%8F-架构)** · **[⚡ 性能](#-性能)** · **[🌐 开放能力](#-开放能力open-api--mcp)** · **[🚀 快速开始](#-快速开始)** · **[📚 完整文档](#-完整文档)** · **[💬 交流群](#%EF%B8%8F-支持与交流)**
 
+> ### 🚀 一键部署（免 Docker）
+> ```bash
+> git clone https://github.com/yangtongq1/tick-stock-panel.git
+> cd tick-stock-panel && ./quick-start.sh   # Windows: .\quick-start.ps1
+> ```
+> 自动装依赖 → 启动 → 一条命令拉取全市场数据（5892 只 A 股 × 近 1 年日K，免费无需 Key）。
+> 详见 **[QUICKSTART.md](./QUICKSTART.md)**（含实测踩坑记录）。
+
 </div>
 
 ---
