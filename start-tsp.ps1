@@ -7,14 +7,17 @@ $logDir = "$Root\data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 
 # ---- AkShare 免费数据源 3021 ----
+# 注: 用 cmd /c start 派生分离进程——避开 Start-Process 在大小写重复 proxy
+#     变量环境下报 "已添加项" 字典键冲突的问题; 分离进程不随终端会话退出
 $aksRunning = Get-NetTCPConnection -State Listen -LocalPort 3021 -ErrorAction SilentlyContinue
 if ($aksRunning) {
   Write-Host "[tsp] 数据源 3021 已在运行"
 } else {
   Write-Host "[tsp] 启动 AkShare 数据源 3021 ..."
-  Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' `
-    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',
-      "Set-Location '$Root\aksource'; python server.py *> '$logDir\aksource.log'"
+  $py = "$env:USERPROFILE\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+  Push-Location "$Root\aksource"
+  cmd /c "start /min `"aksource`" cmd /c `"`"$py`" server.py >> `"$logDir\aksource.log`" 2>&1`"" | Out-Null
+  Pop-Location
 }
 
 # ---- 后端 3018 ----

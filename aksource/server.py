@@ -249,8 +249,8 @@ def financial(req: BatchReq) -> dict:
                             return None
                     rows.append({
                         "symbol": sym, "period_end": str(r.get("日期", ""))[:10],
-                        "eps_basic": num("基本每股收益(元)"),
-                        "roe": num("加权净资产收益率(%)"),
+                        "eps_basic": num("摊薄每股收益(元)") or num("加权每股收益(元)"),
+                        "roe": num("加权净资产收益率(%)") or num("净资产收益率(%)"),
                         "gross_margin": num("销售毛利率(%)"),
                         "net_margin": num("销售净利率(%)"),
                         "debt_to_asset_ratio": num("资产负债率(%)"),
