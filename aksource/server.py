@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""AkShare + Baostock 免费数据源服务 — 为 TSP 提供全量数据能力(绕过 TickFlow 付费 API)
+"""TSP 免费数据源服务 v2 — 新浪 HTTP 行情为主源（适配当前网络环境）
 
-数据源分工:
-  日K     ← Baostock (免注册, 无限流, 稳定)
-  分钟K   ← AkShare 东财 (现价分钟)
-  实时快照 ← AkShare 东财 spot_em
-  财务    ← AkShare 新浪/东财财务指标
+网络环境变化 (2026-11-16): 本机 HTTPS 出站大面积中断, Baostock 端口(17777)不通,
+仅部分 HTTP 行情接口可用。实测可用源:
+  新浪日K   http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData  (scale=240)
+  新浪分钟K 同上接口 scale=5/15/30/60
+  新浪实时   http://hq.sinajs.cn/list=sh600519 (需 Referer)
+  腾讯实时   http://qt.gtimg.cn/q=sh600519 (备用, 重试后可用)
 
 接口契约见 tick-stock-panel/docs/custom-data-source.md
-依赖: pip install fastapi uvicorn akshare pandas baostock
+依赖: pip install fastapi uvicorn pandas requests
 """
 from __future__ import annotations
 
 import logging
 import os
-import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -23,19 +24,43 @@ for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY",
     os.environ.pop(k, None)
 os.environ.setdefault("NO_PROXY", "*")
 
-import akshare as ak  # noqa: E402
 import pandas as pd  # noqa: E402
+import requests  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [aksrc] %(message)s")
 log = logging.getLogger("aksrc")
 
-app = FastAPI(title="TSP Free Data Source (AkShare+Baostock)")
+app = FastAPI(title="TSP Free Data Source (Sina HTTP)")
+
+SINA_KLINE = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+SINA_HQ = "http://hq.sinajs.cn/list="
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://finance.sina.com.cn",
+}
 
 
-def to_ak(symbol: str) -> str:
-    return symbol.split(".")[0]
+def to_sina(symbol: str) -> str:
+    """600519.SH -> sh600519"""
+    code, _, suffix = symbol.partition(".")
+    return f"{suffix.lower()}{code}"
+
+
+def http_get(url: str, retries: int = 3) -> str | None:
+    """带重试的 HTTP GET (网络抖动大, 首次请求常失败)"""
+    for i in range(retries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=12)
+            if r.status_code == 200 and r.text.strip():
+                return r.text
+            if r.status_code == 200 and not r.text.strip():
+                return "[]"
+        except requests.RequestException:
+            pass
+        time.sleep(1.5)
+    return None
 
 
 class BatchReq(BaseModel):
@@ -46,217 +71,184 @@ class BatchReq(BaseModel):
     latest: bool | None = None
 
 
-# ---------------- Baostock 连接池 (线程安全锁) ----------------
-import baostock as bs  # noqa: E402
-
-_BS_LOCK = threading.Lock()
-_BS_LOGGED = False
-
-
-def bs_query(sql: str, params: dict) -> pd.DataFrame | None:
-    """线程安全的 baostock 查询: 登录(一次) → 查询 → 不登出(复用连接)"""
-    global _BS_LOGGED
-    with _BS_LOCK:
-        if not _BS_LOGGED:
-            r = bs.login()
-            if r.error_code != "0":
-                log.error("baostock login fail: %s", r.error_msg)
-                return None
-            _BS_LOGGED = True
-        rs = bs.query_history_k_data_plus(**params, fields=FIELDS_K)
-        if rs.error_code != "0":
-            # 连接可能过期, 重登录一次再试
-            bs.logout()
-            r = bs.login()
-            if r.error_code != "0":
-                return None
-            rs = bs.query_history_k_data_plus(**params, fields=FIELDS_K)
-            if rs.error_code != "0":
-                log.warning("baostock query fail: %s", rs.error_msg)
-                return None
-        rows = []
-        while rs.next():
-            rows.append(rs.get_row_data())
-        return pd.DataFrame(rows, columns=rs.fields)
-
-
-FIELDS_K = "date,open,high,low,close,volume,amount"
-
-
-# ---------------- 日K (Baostock 主力) ----------------
+# ---------------- 日K (新浪 scale=240) ----------------
 @app.post("/daily")
 def daily(req: BatchReq) -> dict:
-    start = (req.start_time or "2020-01-01").replace("-", "")[:8]
-    end = (req.end_time or datetime.now().strftime("%Y%m%d")).replace("-", "")[:8]
-    start = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
-    end = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
     rows: list[dict] = []
-    for sym in req.symbols[:200]:
-        code, _, suffix = sym.partition(".")
-        bs_code = f"sh.{code}" if suffix == "SH" else f"sz.{code}"
+    for sym in req.symbols[:100]:
+        s = to_sina(sym)
+        # datalen 上限 1023, 取足够覆盖 start_time
+        datalen = 250
+        txt = http_get(f"{SINA_KLINE}?symbol={s}&scale=240&ma=no&datalen={datalen}")
+        if not txt:
+            continue
         try:
-            df = bs_query("k", {
-                "code": bs_code,
-                "start_date": start, "end_date": end,
-                "frequency": "d", "adjustflag": "3",  # 3=不复权
-            })
-            if df is None or df.empty:
+            df = pd.read_json(txt.strip('[]'"'"), typ="series") if False else None
+            import json as _json
+            arr = _json.loads(txt)
+            if not arr:
                 continue
-            for _, r in df.iterrows():
-                def n(v):
-                    try:
-                        return float(v) if v not in ("", None) else None
-                    except (TypeError, ValueError):
-                        return None
-                if n(r["close"]) is None:
+            start = (req.start_time or "2020-01-01")[:10]
+            end = (req.end_time or datetime.now().strftime("%Y-%m-%d"))[:10]
+            for it in arr:
+                d = str(it.get("day", ""))[:10]
+                if not (start <= d <= end):
                     continue
                 rows.append({
-                    "symbol": sym, "date": r["date"],
-                    "open": n(r["open"]), "high": n(r["high"]),
-                    "low": n(r["low"]), "close": n(r["close"]),
-                    "volume": n(r["volume"]) or 0,
-                    "amount": n(r["amount"]) or 0,
+                    "symbol": sym, "date": d,
+                    "open": float(it.get("open", 0) or 0),
+                    "high": float(it.get("high", 0) or 0),
+                    "low": float(it.get("low", 0) or 0),
+                    "close": float(it.get("close", 0) or 0),
+                    "volume": float(it.get("volume", 0) or 0),
+                    "amount": 0,
                 })
         except Exception as e:  # noqa: BLE001
-            log.warning("daily %s fail: %s", bs_code, e)
+            log.warning("daily %s fail: %s", s, e)
     log.info("daily %d syms -> %d rows", len(req.symbols), len(rows))
     return {"data": rows}
 
 
-# ---------------- 除权因子 (Baostock 复权因子) ----------------
+# ---------------- 除权因子 (新浪无独立因子接口, 返回近似: 留空回退官方源) ----------------
 @app.post("/adj_factor")
 def adj_factor(req: BatchReq) -> dict:
-    rows: list[dict] = []
-    today = datetime.now().strftime("%Y-%m-%d")
-    for sym in req.symbols[:100]:
-        code, _, suffix = sym.partition(".")
-        bs_code = f"sh.{code}" if suffix == "SH" else f"sz.{code}"
-        try:
-            df = bs_query("k", {
-                "code": bs_code, "start_date": "2020-01-01", "end_date": today,
-                "frequency": "d", "adjustflag": "2",  # 2=前复权
-            })
-            raw = bs_query("k", {
-                "code": bs_code, "start_date": "2020-01-01", "end_date": today,
-                "frequency": "d", "adjustflag": "3",  # 3=不复权
-            })
-            if df is None or raw is None or df.empty or raw.empty:
-                continue
-            try:
-                q = float(df.tail(1).iloc[0]["close"])
-                r0 = float(raw.tail(1).iloc[0]["close"])
-                if r0:
-                    rows.append({"symbol": sym, "trade_date": str(raw.tail(1).iloc[0]["date"]), "ex_factor": round(q / r0, 6)})
-            except (TypeError, ValueError):
-                continue
-        except Exception as e:  # noqa: BLE001
-            log.warning("adj %s fail: %s", bs_code, e)
-    return {"data": rows}
+    return {"data": []}
 
 
-# ---------------- 实时快照 (东财 spot_em, 30s 缓存) ----------------
+# ---------------- 实时快照 (新浪 hq, 30s 缓存) ----------------
 _RT_STATE: dict[str, Any] = {"last": 0.0, "data": []}
 
-@app.get("/realtime")
-def realtime() -> dict:
-    import time
-    now = time.time()
-    if now - _RT_STATE["last"] < 30 and _RT_STATE["data"]:
-        return {"data": _RT_STATE["data"]}
+# 全市场股票代码表在首次请求时从新浪全量接口拉取太重, 改为按需单查+缓存
+# TSP 前端实时场景主要为自选股列表, 单查完全够用
+_HQ_CACHE: dict[str, dict] = {}
+
+
+def parse_sina_hq(sym: str, text: str) -> dict | None:
     try:
-        df = ak.stock_zh_a_spot_em()
-        rows = []
-        for _, r in df.iterrows():
-            code = str(r["代码"])
-            if code.startswith(("4", "8", "92")):
-                sym = f"{code}.BJ"
-            elif code.startswith(("6", "5", "9")):
-                sym = f"{code}.SH"
-            elif code.startswith(("0", "1", "2", "3")):
-                sym = f"{code}.SZ"
-            else:
-                sym = f"{code}.SZ"
-            def f(v):
-                try:
-                    return float(v) if pd.notna(v) else 0.0
-                except (TypeError, ValueError):
-                    return 0.0
-            rows.append({
-                "symbol": sym, "name": str(r["名称"]),
-                "last_price": f(r["最新价"]), "prev_close": f(r["昨收"]),
-                "open": f(r["今开"]), "high": f(r["最高"]), "low": f(r["最低"]),
-                "volume": f(r["成交量"]), "amount": f(r["成交额"]),
-                "change_pct": f(r["涨跌幅"]) / 100,
-                "change_amount": f(r["涨跌额"]),
-                "amplitude": f(r["振幅"]) / 100,
-                "turnover_rate": f(r["换手率"]) / 100,
-            })
-        _RT_STATE["last"] = now
-        _RT_STATE["data"] = rows
-        log.info("realtime(东财): %d rows", len(rows))
-        return {"data": rows}
-    except Exception as e:  # noqa: BLE001
-        log.error("realtime fail: %s", e)
-        return {"data": _RT_STATE["data"]}
+        import re
+        m = re.search(r'"([^"]+)"', text)
+        if not m:
+            return None
+        p = m.group(1).split(",")
+        if len(p) < 32:
+            return None
+        # 新浪字段: 0名称 1今开 2昨收 3最新 4最高 5最低 ... 8成交量(股) 9成交额 ...
+        def f(i):
+            try:
+                return float(p[i]) if p[i] not in ("", "000000") else 0.0
+            except (ValueError, IndexError):
+                return 0.0
+        last, prev = f(3), f(2)
+        chg = last - prev if prev else 0
+        return {
+            "symbol": sym, "name": p[0],
+            "last_price": last, "prev_close": prev,
+            "open": f(1), "high": f(4), "low": f(5),
+            "volume": f(8), "amount": f(9),
+            "change_pct": (chg / prev) if prev else 0,
+            "change_amount": chg,
+            "amplitude": ((f(4) - f(5)) / prev) if prev else 0,
+            "turnover_rate": 0,
+        }
+    except Exception:  # noqa: BLE001
+        return None
 
 
-# ---------------- 分钟K (AkShare 东财 1m) ----------------
+@app.get("/realtime")
+def realtime(symbol: str = "") -> dict:
+    import time as _t
+    now = _t.time()
+    if symbol:
+        s = to_sina(symbol)
+        cached = _HQ_CACHE.get(s)
+        if cached and now - cached["t"] < 30:
+            return {"data": [cached["row"]]}
+        txt = http_get(f"{SINA_HQ}{s}")
+        if txt:
+            row = parse_sina_hq(symbol, txt)
+            if row:
+                _HQ_CACHE[s] = {"t": now, "row": row}
+                return {"data": [row]}
+        return {"data": [cached["row"]] if cached else []}
+    # 无 symbol: 全量模式暂不支持(全市场拉取过重), 返回缓存
+    return {"data": _RT_STATE["data"]}
+
+
+# ---------------- 分钟K (新浪 scale=5/15/30/60) ----------------
 @app.post("/minute")
 def minute(req: BatchReq) -> dict:
     rows: list[dict] = []
     for sym in req.symbols[:50]:
-        code = to_ak(sym)
+        s = to_sina(sym)
+        txt = http_get(f"{SINA_KLINE}?symbol={s}&scale=5&ma=no&datalen=200")
+        if not txt:
+            continue
         try:
-            df = ak.stock_zh_a_hist_min_em(symbol=code, period="1", adjust="")
-            if df is None or df.empty:
-                continue
-            for _, r in df.iterrows():
+            import json as _json
+            arr = _json.loads(txt)
+            for it in arr:
                 rows.append({
-                    "symbol": sym, "datetime": str(r["时间"]),
-                    "open": float(r["开盘"]), "high": float(r["最高"]),
-                    "low": float(r["最低"]), "close": float(r["收盘"]),
-                    "volume": float(r["成交量"]),
+                    "symbol": sym, "datetime": str(it.get("day", "")),
+                    "open": float(it.get("open", 0) or 0),
+                    "high": float(it.get("high", 0) or 0),
+                    "low": float(it.get("low", 0) or 0),
+                    "close": float(it.get("close", 0) or 0),
+                    "volume": float(it.get("volume", 0) or 0),
                 })
         except Exception as e:  # noqa: BLE001
-            log.warning("minute %s fail: %s", code, e)
+            log.warning("minute %s fail: %s", s, e)
     return {"data": rows}
 
 
-# ---------------- 五档盘口 (留空回退, 不写脏数据) ----------------
+# ---------------- 五档盘口 (新浪 hq 自带五档, 可解析) ----------------
 @app.post("/depth5")
 def depth5(req: BatchReq) -> dict:
-    return {"data": []}
+    rows: list[dict] = []
+    for sym in req.symbols[:50]:
+        s = to_sina(sym)
+        txt = http_get(f"{SINA_HQ}{s}")
+        if not txt:
+            continue
+        try:
+            import re
+            m = re.search(r'"([^"]+)"', txt)
+            if not m:
+                continue
+            p = m.group(1).split(",")
+            if len(p) < 32:
+                continue
+            def f(i):
+                try:
+                    return float(p[i]) if p[i] not in ("", "000000") else 0.0
+                except (ValueError, IndexError):
+                    return 0.0
+            rows.append({
+                "symbol": sym, "datetime": datetime.now().isoformat(timespec="seconds"),
+                "bid1_price": f(11), "bid1_volume": f(12) * 100,
+                "bid2_price": f(13), "bid2_volume": f(14) * 100,
+                "bid3_price": f(15), "bid3_volume": f(16) * 100,
+                "bid4_price": f(17), "bid4_volume": f(18) * 100,
+                "bid5_price": f(19), "bid5_volume": f(20) * 100,
+                "ask1_price": f(21), "ask1_volume": f(22) * 100,
+                "ask2_price": f(23), "ask2_volume": f(24) * 100,
+                "ask3_price": f(25), "ask3_volume": f(26) * 100,
+                "ask4_price": f(27), "ask4_volume": f(28) * 100,
+                "ask5_price": f(29), "ask5_volume": f(30) * 100,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("depth5 %s fail: %s", s, e)
+    return {"data": rows}
 
 
-# ---------------- 财务 (AkShare 财务指标) ----------------
+# ---------------- 财务 (新浪财务指标, HTTP 接口) ----------------
 @app.post("/financial")
 def financial(req: BatchReq) -> dict:
     rows: list[dict] = []
-    table = req.table or "metrics"
     for sym in req.symbols[:80]:
-        code = to_ak(sym)
-        try:
-            if table == "metrics":
-                df = ak.stock_financial_analysis_indicator(symbol=code)
-                if df is None or df.empty:
-                    continue
-                for _, r in df.tail(12).iterrows():
-                    def num(col, _r=r):
-                        try:
-                            v = _r.get(col)
-                            return float(v) if v not in (None, "--", "") else None
-                        except (TypeError, ValueError):
-                            return None
-                    rows.append({
-                        "symbol": sym, "period_end": str(r.get("日期", ""))[:10],
-                        "eps_basic": num("摊薄每股收益(元)") or num("加权每股收益(元)"),
-                        "roe": num("加权净资产收益率(%)") or num("净资产收益率(%)"),
-                        "gross_margin": num("销售毛利率(%)"),
-                        "net_margin": num("销售净利率(%)"),
-                        "debt_to_asset_ratio": num("资产负债率(%)"),
-                    })
-        except Exception as e:  # noqa: BLE001
-            log.warning("financial %s fail: %s", code, e)
+        code = sym.split(".")[0]
+        # 新浪财务接口: https 需要, 当前网络 HTTPS 不通 → 留空回退官方源
+        # 待网络恢复后可改走 akshare
+        _ = code
     return {"data": rows}
 
 
