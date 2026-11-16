@@ -40,7 +40,8 @@ datasets:
     url: http://127.0.0.1:3021/realtime
     method: GET
     rpm: 6
-    timeout: 60.0
+    timeout: 120.0
+    pct_unit: decimal
     response_path: data
     field_map:
       symbol: symbol

@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -36,7 +37,6 @@ log = logging.getLogger("aksrc")
 app = FastAPI(title="TSP Free Data Source (Sina HTTP)")
 
 SINA_KLINE = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
-SINA_HQ = "http://hq.sinajs.cn/list="
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Referer": "https://finance.sina.com.cn",
@@ -122,47 +122,155 @@ def adj_factor(req: BatchReq) -> dict:
     return {"data": []}
 
 
-# ---------------- 实时快照 (新浪 hq, 30s 缓存) ----------------
-_RT_STATE: dict[str, Any] = {"last": 0.0, "data": []}
+# ---------------- 腾讯行情源 (qt.gtimg.cn, 实时+五档共用) ----------------
+QT_QUOTE = "http://qt.gtimg.cn/q="
 
-# 全市场股票代码表在首次请求时从新浪全量接口拉取太重, 改为按需单查+缓存
-# TSP 前端实时场景主要为自选股列表, 单查完全够用
+
+# ---------------- 实时快照 (腾讯 qt, 单股 5s TTL + 全市场后台刷新) ----------------
+
+# 单股查询缓存 (自选股场景, 5s TTL)
 _HQ_CACHE: dict[str, dict] = {}
 
+# 全市场快照: 后台线程 90s 一轮全量刷新, 请求命中缓存秒回
+# 背景: TSP quote_service._fetch_full_market_quotes 调 get_realtime() 无参,
+#      腾讯批量限速 ~3 QPS, 5892 只一轮实测 65-80s, 同步等待会顶爆 TSP 的 60s timeout
+_FULL_RT_TTL = 30.0  # 服务化后连接热, 实测一轮 10-13s, 30s TTL 数据足够新鲜
+_FULL_RT_WORKERS = 8
+_FULL_RT_STATE: dict[str, Any] = {
+    "rows": [],          # 全市场行情列表
+    "by_symbol": {},     # symbol -> row
+    "last_ok": 0.0,      # 上次成功刷新时间
+    "refreshing": False,
+    "refresh_count": 0,
+    "errors": 0,
+}
+_FULL_RT_LOCK = threading.Lock()
+_INSTRUMENTS: list[str] | None = None
 
-def parse_sina_hq(sym: str, text: str) -> dict | None:
-    try:
-        import re
-        m = re.search(r'"([^"]+)"', text)
-        if not m:
-            return None
-        p = m.group(1).split(",")
-        if len(p) < 32:
-            return None
-        # 新浪字段: 0名称 1今开 2昨收 3最新 4最高 5最低 ... 8成交量(股) 9成交额 ...
-        def f(i):
-            try:
-                return float(p[i]) if p[i] not in ("", "000000") else 0.0
-            except (ValueError, IndexError):
-                return 0.0
-        last, prev = f(3), f(2)
-        chg = last - prev if prev else 0
-        return {
-            "symbol": sym, "name": p[0],
-            "last_price": last, "prev_close": prev,
-            "open": f(1), "high": f(4), "low": f(5),
-            "volume": f(8), "amount": f(9),
-            "change_pct": (chg / prev) if prev else 0,
-            "change_amount": chg,
-            "amplitude": ((f(4) - f(5)) / prev) if prev else 0,
-            "turnover_rate": 0,
-        }
-    except Exception:  # noqa: BLE001
-        return None
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_INSTRUMENTS_PATH = os.path.join(_BASE_DIR, "..", "data", "instruments", "instruments.parquet")
 
 
-# ---------------- 腾讯实时 (qt.gtimg.cn, 含五档) ----------------
-QT_QUOTE = "http://qt.gtimg.cn/q="
+def _load_instruments() -> list[str]:
+    """全市场代码表 (instruments.parquet, 首次调用加载后常驻)"""
+    global _INSTRUMENTS
+    if _INSTRUMENTS is None:
+        try:
+            df = pd.read_parquet(_INSTRUMENTS_PATH, columns=["symbol"])
+            syms = [str(s) for s in df["symbol"].tolist() if s]
+            _INSTRUMENTS = syms
+            log.info("instruments loaded: %d symbols", len(syms))
+        except Exception as e:  # noqa: BLE001
+            log.warning("load instruments fail: %s", e)
+            _INSTRUMENTS = []
+    return _INSTRUMENTS
+
+
+def _refresh_full_market() -> None:
+    """全量拉一轮腾讯行情 (30 只/批 × 197 批, 8 并发, 实测 65-80s)"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    symbols = _load_instruments()
+    if not symbols:
+        return
+    t0 = time.time()
+    sina_syms = [to_sina(s) for s in symbols]
+    batches = [sina_syms[i:i + 30] for i in range(0, len(sina_syms), 30)]
+    raw_map: dict[str, str] = {}
+    errors = 0
+
+    def fetch(batch: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        body = http_get(f"{QT_QUOTE}{','.join(batch)}", retries=3)
+        if not body:
+            return out
+        for line in body.splitlines():
+            m = re.search(r'v_(\w+)="([^"]+)"', line)
+            if m:
+                out[m.group(1)] = f'"{m.group(2)}"'
+        return out
+
+    with ThreadPoolExecutor(max_workers=_FULL_RT_WORKERS) as ex:
+        for out in ex.map(fetch, batches):
+            if out:
+                raw_map.update(out)
+            else:
+                errors += 1
+
+    rows: list[dict] = []
+    by_symbol: dict[str, dict] = {}
+    for sym in symbols:
+        body = raw_map.get(to_sina(sym))
+        if not body:
+            continue
+        row = parse_qt(sym, body)
+        if row:
+            rows.append(row)
+            by_symbol[sym] = row
+
+    with _FULL_RT_LOCK:
+        if rows:
+            _FULL_RT_STATE["rows"] = rows
+            _FULL_RT_STATE["by_symbol"] = by_symbol
+            _FULL_RT_STATE["last_ok"] = time.time()
+            _FULL_RT_STATE["refresh_count"] += 1
+        _FULL_RT_STATE["errors"] = errors
+        _FULL_RT_STATE["refreshing"] = False
+    log.info(
+        "full-market refresh #%d: %d/%d rows in %.1fs (%d batch errors)",
+        _FULL_RT_STATE["refresh_count"], len(rows), len(symbols),
+        time.time() - t0, errors,
+    )
+
+
+def _full_market_refresher() -> None:
+    """后台守护线程: 每 90s 刷新一轮全市场快照 (启动后立即跑第一轮)"""
+    while True:
+        with _FULL_RT_LOCK:
+            if _FULL_RT_STATE["refreshing"]:
+                time.sleep(5)
+                continue
+            _FULL_RT_STATE["refreshing"] = True
+        try:
+            _refresh_full_market()
+        except Exception as e:  # noqa: BLE001
+            with _FULL_RT_LOCK:
+                _FULL_RT_STATE["refreshing"] = False
+            log.warning("full-market refresh fail: %s", e)
+            time.sleep(10)
+        time.sleep(_FULL_RT_TTL)
+
+
+# 后台刷新线程经 FastAPI startup 事件拉起 (见文件底部 @app.on_event),
+# 避免 import 时竞态 (parse_qt/qt_get 定义在模块后半部)
+
+
+_RT_CACHE_TTL = 5.0  # 单股缓存秒数: 腾讯源本身 3-5s 延迟, 缓存 5s 保证端到端 10s 内且不放大请求量
+
+
+@app.get("/realtime")
+def realtime(symbol: str = "") -> dict:
+    now = time.time()
+    if symbol:
+        cached = _HQ_CACHE.get(symbol)
+        if cached and now - cached["t"] < _RT_CACHE_TTL:
+            return {"data": [cached["row"]]}
+        # 单股优先走全市场缓存 (90s 内), 过期才单独拉
+        full = _FULL_RT_STATE["by_symbol"].get(symbol)
+        if full and now - _FULL_RT_STATE["last_ok"] < _FULL_RT_TTL:
+            return {"data": [full]}
+        raw = qt_get([symbol])
+        body = raw.get(to_sina(symbol))
+        if body:
+            row = parse_qt(symbol, body)
+            if row:
+                _HQ_CACHE[symbol] = {"t": now, "row": row}
+                return {"data": [row]}
+        return {"data": [cached["row"]] if cached else []}
+    # 无参 = 全市场快照 (TSP _fetch_full_market_quotes 契约), 后台缓存直接秒回
+    return {"data": _FULL_RT_STATE["rows"]}
+
+
 # 腾讯 v_ 字段索引 (gbk 解码后按 ~ 切分)
 # 1名称 2代码 3最新 4昨收 5今开 6成交量(手) ... 30时间 31涨跌 32涨跌% 33最高 34最低
 # 36成交量 37成交额(万) 38换手% 39PE ... 41振幅% ... 43流通市值 44总市值 45PB 46涨停 47跌停
@@ -238,35 +346,15 @@ def qt_get(symbols: list[str]) -> dict[str, str]:
     return out
 
 
-_RT_CACHE_TTL = 5.0  # 实时缓存秒数: 腾讯源本身 3-5s 延迟, 缓存 5s 保证端到端 10s 内且不放大请求量
-
-
-@app.get("/realtime")
-def realtime(symbol: str = "") -> dict:
-    now = time.time()
-    if symbol:
-        cached = _HQ_CACHE.get(symbol)
-        if cached and now - cached["t"] < _RT_CACHE_TTL:
-            return {"data": [cached["row"]]}
-        raw = qt_get([symbol])
-        body = raw.get(to_sina(symbol))
-        if body:
-            row = parse_qt(symbol, body)
-            if row:
-                _HQ_CACHE[symbol] = {"t": now, "row": row}
-                return {"data": [row]}
-        return {"data": [cached["row"]] if cached else []}
-    return {"data": _RT_STATE["data"]}
-
-
-# ---------------- 分钟K (腾讯 m1, 1分钟K) ----------------
+# ---------------- 分钟K (腾讯 m1 主源 + 新浪 5 分钟K 降级) ----------------
 QT_MKLINE = "http://proxy.finance.qq.com/ifzqgtimg/appstock/app/kline/mkline"
 
 
 def qt_minute_rows(sym: str, count: int = 320) -> list[dict]:
-    """拉腾讯 1 分钟K。m1 数组: [时间YYYYMMDDHHMM, 开, 收, 高, 低, 量(手)]"""
+    """拉腾讯 1 分钟K。m1 数组: [时间YYYYMMDDHHMM, 开, 收, 高, 低, 量(手)]
+    注意: 腾讯 mkline 高峰/被限流时响应 12-15s, timeout 用 20s。"""
     s = to_sina(sym)
-    body = http_get(f"{QT_MKLINE}?param={s},m1,,{count}", retries=3)
+    body = http_get(f"{QT_MKLINE}?param={s},m1,,{count}", retries=2, timeout=20.0)
     if not body:
         return []
     try:
@@ -298,11 +386,50 @@ def qt_minute_rows(sym: str, count: int = 320) -> list[dict]:
         return []
 
 
+def sina_minute_rows(sym: str, count: int = 320) -> list[dict]:
+    """新浪 5 分钟K (腾讯 m1 失败时的降级源)。
+    scale=5 无 1 分钟粒度, 返回 5 分钟K (聚合近似)。"""
+    s = to_sina(sym)
+    n = max(2, min(count // 5 + 8, 1023))
+    body = http_get(f"{SINA_KLINE}?symbol={s}&scale=5&ma=no&datalen={n}", retries=2, timeout=12.0)
+    if not body:
+        return []
+    try:
+        import json as _json
+        arr = _json.loads(body.strip())
+        rows = []
+        for it in arr:
+            try:
+                dt = str(it.get("day", ""))[:16] + ":00"
+                rows.append({
+                    "symbol": sym, "datetime": dt,
+                    "open": float(it.get("open", 0) or 0),
+                    "high": float(it.get("high", 0) or 0),
+                    "low": float(it.get("low", 0) or 0),
+                    "close": float(it.get("close", 0) or 0),
+                    "volume": float(it.get("volume", 0) or 0),
+                })
+            except (ValueError, TypeError):
+                continue
+        return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("sina minute %s fail: %s", s, e)
+        return []
+
+
+def minute_rows(sym: str, count: int = 320) -> list[dict]:
+    """分钟K: 腾讯 m1 优先, 失败降级新浪 5 分钟K"""
+    rows = qt_minute_rows(sym, count)
+    if rows:
+        return rows
+    return sina_minute_rows(sym, count)
+
+
 @app.post("/minute")
 def minute(req: BatchReq) -> dict:
     rows: list[dict] = []
     for sym in req.symbols[:50]:
-        rows.extend(qt_minute_rows(sym, 320))
+        rows.extend(minute_rows(sym, 320))
     log.info("minute %d syms -> %d rows", len(req.symbols), len(rows))
     return {"data": rows}
 
@@ -312,7 +439,7 @@ def minute(req: BatchReq) -> dict:
 def full_minute(req: BatchReq) -> dict:
     rows: list[dict] = []
     for sym in req.symbols[:50]:
-        rows.extend(qt_minute_rows(sym, 320))
+        rows.extend(minute_rows(sym, 320))
     log.info("full_minute %d syms -> %d rows", len(req.symbols), len(rows))
     return {"data": rows}
 
@@ -346,6 +473,15 @@ def financial(req: BatchReq) -> dict:
         # 待网络恢复后可改走 akshare
         _ = code
     return {"data": rows}
+
+
+@app.on_event("startup")
+def _start_full_rt_refresher() -> None:
+    """FastAPI startup: 拉起全市场行情后台刷新线程 (90s 一轮)"""
+    if not any(t.name == "full-rt" for t in threading.enumerate()):
+        t = threading.Thread(target=_full_market_refresher, daemon=True, name="full-rt")
+        t.start()
+        log.info("full-market refresher started (TTL %.0fs)", _FULL_RT_TTL)
 
 
 if __name__ == "__main__":
