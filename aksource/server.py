@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -49,14 +50,17 @@ def to_sina(symbol: str) -> str:
 
 
 def http_get(url: str, retries: int = 3) -> str | None:
-    """带重试的 HTTP GET (网络抖动大, 首次请求常失败)"""
+    """带重试的 HTTP GET (网络抖动大, 首次请求常失败); 腾讯接口 gbk 编码"""
     for i in range(retries):
         try:
             r = requests.get(url, headers=HEADERS, timeout=12)
-            if r.status_code == 200 and r.text.strip():
-                return r.text
-            if r.status_code == 200 and not r.text.strip():
-                return "[]"
+            if r.status_code == 200:
+                if not r.content.strip():
+                    return "[]"
+                try:
+                    return r.content.decode("gbk", errors="replace")
+                except UnicodeDecodeError:
+                    return r.text
         except requests.RequestException:
             pass
         time.sleep(1.5)
@@ -154,23 +158,98 @@ def parse_sina_hq(sym: str, text: str) -> dict | None:
         return None
 
 
+# ---------------- 腾讯实时 (qt.gtimg.cn, 含五档) ----------------
+QT_QUOTE = "http://qt.gtimg.cn/q="
+# 腾讯 v_ 字段索引 (gbk 解码后按 ~ 切分)
+# 1名称 2代码 3最新 4昨收 5今开 6成交量(手) ... 30时间 31涨跌 32涨跌% 33最高 34最低
+# 36成交量 37成交额(万) 38换手% 39PE ... 41振幅% ... 43流通市值 44总市值 45PB 46涨停 47跌停
+# 买五档: 9-18 (价量交替) 卖五档: 19-28
+
+
+def parse_qt(sym: str, text: str) -> dict | None:
+    try:
+        m = re.search(r'"([^"]+)"', text)
+        if not m:
+            return None
+        p = m.group(1).split("~")
+        if len(p) < 48 or not p[3]:
+            return None
+        def f(i):
+            try:
+                v = float(p[i])
+                return v if v != -1 else 0.0
+            except (ValueError, IndexError):
+                return 0.0
+        last, prev = f(3), f(4)
+        chg = f(31)
+        return {
+            "symbol": sym, "name": p[1],
+            "last_price": last, "prev_close": prev,
+            "open": f(5), "high": f(33), "low": f(34),
+            "volume": f(36) * 100, "amount": f(37) * 10000,
+            "change_pct": f(32) / 100, "change_amount": chg,
+            "amplitude": f(41) / 100, "turnover_rate": f(38) / 100,
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def parse_qt_depth5(sym: str, text: str) -> dict | None:
+    """腾讯五档: 买一价9 量10 买二价11 量12... 卖一价19 量20..."""
+    try:
+        m = re.search(r'"([^"]+)"', text)
+        if not m:
+            return None
+        p = m.group(1).split("~")
+        if len(p) < 48:
+            return None
+        def fv(i):
+            try:
+                return float(p[i])
+            except (ValueError, IndexError):
+                return 0.0
+        bids = [[fv(9 + k * 2), fv(10 + k * 2)] for k in range(5)]
+        asks = [[fv(19 + k * 2), fv(20 + k * 2)] for k in range(5)]
+        return {"symbol": sym, "bids": bids, "asks": asks}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def qt_get(symbols: list[str]) -> dict[str, str]:
+    """批量拉腾讯行情原文, 返回 {新浪代码: "行情体"}"""
+    out: dict[str, str] = {}
+    syms = [to_sina(s) for s in symbols]
+    for i in range(0, len(syms), 30):
+        batch = syms[i:i + 30]
+        qs = ",".join(batch)
+        body = http_get(f"{QT_QUOTE}{qs}", retries=4)
+        if not body:
+            continue
+        try:
+            for line in body.splitlines():
+                m = re.search(r'v_(\w+)="([^"]+)"', line)
+                if m:
+                    out[m.group(1)] = f'"{m.group(2)}"'
+        except Exception as e:  # noqa: BLE001
+            log.warning("qt batch fail: %s", e)
+    return out
+
+
 @app.get("/realtime")
 def realtime(symbol: str = "") -> dict:
-    import time as _t
-    now = _t.time()
+    now = time.time()
     if symbol:
-        s = to_sina(symbol)
-        cached = _HQ_CACHE.get(s)
+        cached = _HQ_CACHE.get(symbol)
         if cached and now - cached["t"] < 30:
             return {"data": [cached["row"]]}
-        txt = http_get(f"{SINA_HQ}{s}")
-        if txt:
-            row = parse_sina_hq(symbol, txt)
+        raw = qt_get([symbol])
+        body = raw.get(to_sina(symbol))
+        if body:
+            row = parse_qt(symbol, body)
             if row:
-                _HQ_CACHE[s] = {"t": now, "row": row}
+                _HQ_CACHE[symbol] = {"t": now, "row": row}
                 return {"data": [row]}
         return {"data": [cached["row"]] if cached else []}
-    # 无 symbol: 全量模式暂不支持(全市场拉取过重), 返回缓存
     return {"data": _RT_STATE["data"]}
 
 
@@ -200,43 +279,22 @@ def minute(req: BatchReq) -> dict:
     return {"data": rows}
 
 
-# ---------------- 五档盘口 (新浪 hq 自带五档, 可解析) ----------------
+# ---------------- 五档盘口 (腾讯 qt, asks/bids 嵌套数组契约) ----------------
 @app.post("/depth5")
 def depth5(req: BatchReq) -> dict:
     rows: list[dict] = []
-    for sym in req.symbols[:50]:
-        s = to_sina(sym)
-        txt = http_get(f"{SINA_HQ}{s}")
-        if not txt:
-            continue
-        try:
-            import re
-            m = re.search(r'"([^"]+)"', txt)
-            if not m:
+    for i in range(0, len(req.symbols[:50]), 30):
+        batch = req.symbols[i:i + 30]
+        raw = qt_get(batch)
+        for sym in batch:
+            body = raw.get(to_sina(sym))
+            if not body:
                 continue
-            p = m.group(1).split(",")
-            if len(p) < 32:
-                continue
-            def f(i):
-                try:
-                    return float(p[i]) if p[i] not in ("", "000000") else 0.0
-                except (ValueError, IndexError):
-                    return 0.0
-            rows.append({
-                "symbol": sym, "datetime": datetime.now().isoformat(timespec="seconds"),
-                "bid1_price": f(11), "bid1_volume": f(12) * 100,
-                "bid2_price": f(13), "bid2_volume": f(14) * 100,
-                "bid3_price": f(15), "bid3_volume": f(16) * 100,
-                "bid4_price": f(17), "bid4_volume": f(18) * 100,
-                "bid5_price": f(19), "bid5_volume": f(20) * 100,
-                "ask1_price": f(21), "ask1_volume": f(22) * 100,
-                "ask2_price": f(23), "ask2_volume": f(24) * 100,
-                "ask3_price": f(25), "ask3_volume": f(26) * 100,
-                "ask4_price": f(27), "ask4_volume": f(28) * 100,
-                "ask5_price": f(29), "ask5_volume": f(30) * 100,
-            })
-        except Exception as e:  # noqa: BLE001
-            log.warning("depth5 %s fail: %s", s, e)
+            row = parse_qt_depth5(sym, body)
+            if row:
+                rows.append({
+                    "code": sym, "sell": row["asks"], "buy": row["bids"],
+                })
     return {"data": rows}
 
 

@@ -1,0 +1,106 @@
+name: aksource
+display_name: AkShare 免费源
+auth:
+  type: none
+datasets:
+  daily:
+    url: http://127.0.0.1:3021/daily
+    method: POST
+    batch: 100
+    rpm: 120
+    timeout: 120.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      date: date
+      open: open
+      high: high
+      low: low
+      close: close
+      volume: volume
+      amount: amount
+    symbols_param: symbols
+    start_param: start_time
+    end_param: end_time
+  adj_factor:
+    url: http://127.0.0.1:3021/adj_factor
+    method: POST
+    batch: 50
+    rpm: 60
+    timeout: 120.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      trade_date: trade_date
+      ex_factor: ex_factor
+    symbols_param: symbols
+    start_param: start_time
+    end_param: end_time
+  realtime:
+    url: http://127.0.0.1:3021/realtime
+    method: GET
+    rpm: 6
+    timeout: 60.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      name: name
+      last_price: last_price
+      prev_close: prev_close
+      open: open
+      high: high
+      low: low
+      volume: volume
+      amount: amount
+      change_pct: change_pct
+      change_amount: change_amount
+      amplitude: amplitude
+      turnover_rate: turnover_rate
+  minute:
+    url: http://127.0.0.1:3021/minute
+    method: POST
+    batch: 30
+    rpm: 30
+    timeout: 180.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      datetime: datetime
+      open: open
+      high: high
+      low: low
+      close: close
+      volume: volume
+    symbols_param: symbols
+    start_param: start_time
+    end_param: end_time
+  depth5:
+    url: http://127.0.0.1:3021/depth5
+    method: POST
+    batch: 30
+    rpm: 30
+    timeout: 60.0
+    response_path: data
+    field_map:
+      code: symbol
+      sell: asks
+      buy: bids
+    symbols_param: symbols
+  financial:
+    url: http://127.0.0.1:3021/financial
+    method: POST
+    batch: 50
+    rpm: 30
+    timeout: 180.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      period_end: period_end
+      eps_basic: eps_basic
+      roe: roe
+      gross_margin: gross_margin
+      net_margin: net_margin
+      debt_to_asset_ratio: debt_to_asset_ratio
+    symbols_param: symbols
+    start_param: start_time
+    end_param: end_time

@@ -3,7 +3,7 @@
 set fs = CreateObject("Scripting.FileSystemObject")
 set ws = CreateObject("Wscript.Shell")
 strRoot = "C:\Users\admin\WorkBuddy\2026-11-13-14-08-19\tick-stock-panel"
-strPy = "C:\Users\admin\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+strPy = "C:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe"
 strLog = strRoot & "\data\logs\aksource.log"
 
 ' 端口守卫: 已在运行则退出 (用 netstat 检查)
