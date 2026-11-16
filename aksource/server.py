@@ -49,11 +49,12 @@ def to_sina(symbol: str) -> str:
     return f"{suffix.lower()}{code}"
 
 
-def http_get(url: str, retries: int = 3) -> str | None:
-    """带重试的 HTTP GET (网络抖动大, 首次请求常失败); 腾讯接口 gbk 编码"""
+def http_get(url: str, retries: int = 3, timeout: float = 6.0) -> str | None:
+    """带重试的 HTTP GET (腾讯接口首次请求常瞬时失败, 快退快重试)"""
+    backoff = 0.3
     for i in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=12)
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
             if r.status_code == 200:
                 if not r.content.strip():
                     return "[]"
@@ -63,7 +64,9 @@ def http_get(url: str, retries: int = 3) -> str | None:
                     return r.text
         except requests.RequestException:
             pass
-        time.sleep(1.5)
+        if i < retries - 1:
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 1.5)
     return None
 
 
@@ -235,12 +238,15 @@ def qt_get(symbols: list[str]) -> dict[str, str]:
     return out
 
 
+_RT_CACHE_TTL = 5.0  # 实时缓存秒数: 腾讯源本身 3-5s 延迟, 缓存 5s 保证端到端 10s 内且不放大请求量
+
+
 @app.get("/realtime")
 def realtime(symbol: str = "") -> dict:
     now = time.time()
     if symbol:
         cached = _HQ_CACHE.get(symbol)
-        if cached and now - cached["t"] < 30:
+        if cached and now - cached["t"] < _RT_CACHE_TTL:
             return {"data": [cached["row"]]}
         raw = qt_get([symbol])
         body = raw.get(to_sina(symbol))
