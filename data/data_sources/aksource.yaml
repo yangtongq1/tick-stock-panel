@@ -74,6 +74,24 @@ datasets:
     symbols_param: symbols
     start_param: start_time
     end_param: end_time
+  full_minute:
+    url: http://127.0.0.1:3021/full_minute
+    method: POST
+    batch: 30
+    rpm: 30
+    timeout: 300.0
+    response_path: data
+    field_map:
+      symbol: symbol
+      datetime: datetime
+      open: open
+      high: high
+      low: low
+      close: close
+      volume: volume
+    symbols_param: symbols
+    start_param: start_time
+    end_param: end_time
   depth5:
     url: http://127.0.0.1:3021/depth5
     method: POST
@@ -86,6 +104,8 @@ datasets:
       sell: asks
       buy: bids
     symbols_param: symbols
+    start_param: start_time
+    end_param: end_time
   financial:
     url: http://127.0.0.1:3021/financial
     method: POST

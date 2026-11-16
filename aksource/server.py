@@ -253,29 +253,61 @@ def realtime(symbol: str = "") -> dict:
     return {"data": _RT_STATE["data"]}
 
 
-# ---------------- 分钟K (新浪 scale=5/15/30/60) ----------------
+# ---------------- 分钟K (腾讯 m1, 1分钟K) ----------------
+QT_MKLINE = "http://proxy.finance.qq.com/ifzqgtimg/appstock/app/kline/mkline"
+
+
+def qt_minute_rows(sym: str, count: int = 320) -> list[dict]:
+    """拉腾讯 1 分钟K。m1 数组: [时间YYYYMMDDHHMM, 开, 收, 高, 低, 量(手)]"""
+    s = to_sina(sym)
+    body = http_get(f"{QT_MKLINE}?param={s},m1,,{count}", retries=3)
+    if not body:
+        return []
+    try:
+        import json as _json
+        d = _json.loads(body)
+        node = d.get("data", {}).get(s, {})
+        mk = node.get("m1") or []
+        rows = []
+        for it in mk:
+            if len(it) < 6:
+                continue
+            t = str(it[0])
+            if len(t) == 12:
+                dt = f"{t[:4]}-{t[4:6]}-{t[6:8]} {t[8:10]}:{t[10:12]}:00"
+            else:
+                dt = t
+            try:
+                rows.append({
+                    "symbol": sym, "datetime": dt,
+                    "open": float(it[1]), "close": float(it[2]),
+                    "high": float(it[3]), "low": float(it[4]),
+                    "volume": float(it[5]) * 100,
+                })
+            except (ValueError, TypeError):
+                continue
+        return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("qt minute %s fail: %s", s, e)
+        return []
+
+
 @app.post("/minute")
 def minute(req: BatchReq) -> dict:
     rows: list[dict] = []
     for sym in req.symbols[:50]:
-        s = to_sina(sym)
-        txt = http_get(f"{SINA_KLINE}?symbol={s}&scale=5&ma=no&datalen=200")
-        if not txt:
-            continue
-        try:
-            import json as _json
-            arr = _json.loads(txt)
-            for it in arr:
-                rows.append({
-                    "symbol": sym, "datetime": str(it.get("day", "")),
-                    "open": float(it.get("open", 0) or 0),
-                    "high": float(it.get("high", 0) or 0),
-                    "low": float(it.get("low", 0) or 0),
-                    "close": float(it.get("close", 0) or 0),
-                    "volume": float(it.get("volume", 0) or 0),
-                })
-        except Exception as e:  # noqa: BLE001
-            log.warning("minute %s fail: %s", s, e)
+        rows.extend(qt_minute_rows(sym, 320))
+    log.info("minute %d syms -> %d rows", len(req.symbols), len(rows))
+    return {"data": rows}
+
+
+# ---------------- 全量分钟 (与 minute 同形, 当日窗口批量) ----------------
+@app.post("/full_minute")
+def full_minute(req: BatchReq) -> dict:
+    rows: list[dict] = []
+    for sym in req.symbols[:50]:
+        rows.extend(qt_minute_rows(sym, 320))
+    log.info("full_minute %d syms -> %d rows", len(req.symbols), len(rows))
     return {"data": rows}
 
 
