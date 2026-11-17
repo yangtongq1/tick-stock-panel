@@ -116,10 +116,71 @@ def daily(req: BatchReq) -> dict:
     return {"data": rows}
 
 
-# ---------------- 除权因子 (新浪无独立因子接口, 返回近似: 留空回退官方源) ----------------
+# ---------------- 除权因子 (腾讯 qfq/raw 对比推导) ----------------
+QT_FQKLINE = "http://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get"
+QT_KLINE = "http://proxy.finance.qq.com/ifzqgtimg/appstock/app/kline/kline"
+
+
+def adj_factor_rows(sym: str, days: int = 400) -> list[dict]:
+    """推导除权因子: 腾讯前复权(qfq)与不复权(raw)日K收盘对比。
+
+    ex_factor 定义 (TSP minute_adjust 契约): 当日 qfq/raw 比值 ÷ 前一日比值,
+    即相邻除权事件比。TSP 侧 cum_prod 后 cum/total 做 ratio, 历史价 ×ratio
+    即得前复权口径。波动 <0.2% 的比值噪声用 3 位小数圆整滤掉 (真实除权
+    事件比值跳变通常 >1%)。
+    """
+    s = to_sina(sym)
+    qfq_body = http_get(f"{QT_FQKLINE}?param={s},day,,,{days},qfq", retries=2, timeout=12.0)
+    raw_body = http_get(f"{QT_KLINE}?param={s},day,,,{days}", retries=2, timeout=12.0)
+    if not qfq_body or not raw_body:
+        return []
+    try:
+        import json as _json
+        node1 = _json.loads(qfq_body).get("data", {}).get(s, {})
+        qfq = node1.get("qfqday") or node1.get("day") or []
+        node2 = _json.loads(raw_body).get("data", {}).get(s, {})
+        raw = node2.get("day") or []
+        qfq_close = {str(r[0]): float(r[2]) for r in qfq if len(r) >= 3}
+        raw_close = {str(r[0]): float(r[2]) for r in raw if len(r) >= 3}
+        common = sorted(set(qfq_close) & set(raw_close))
+        if len(common) < 2:
+            return []
+
+        rows: list[dict] = []
+        prev_ratio: float | None = None
+        for d in common:
+            rc = raw_close[d]
+            if rc <= 0:
+                continue
+            ratio = qfq_close[d] / rc
+            if prev_ratio is not None:
+                # 圆整 3 位小数滤噪声; 与前日比值差异 >0.5% 视为除权事件
+                r_now, r_prev = round(ratio, 3), round(prev_ratio, 3)
+                if abs(r_now - r_prev) > 0.005:
+                    rows.append({
+                        "symbol": sym,
+                        "trade_date": d,
+                        "ex_factor": r_now / r_prev,
+                    })
+            prev_ratio = ratio
+        return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("adj_factor %s fail: %s", s, e)
+        return []
+
+
 @app.post("/adj_factor")
 def adj_factor(req: BatchReq) -> dict:
-    return {"data": []}
+    """并行推导除权因子 (每只 2 次 HTTP, 串行太慢; 12 并发压到 ~1/12 耗时)"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    symbols = req.symbols[:50]
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        for events in ex.map(adj_factor_rows, symbols):
+            rows.extend(events)
+    log.info("adj_factor %d syms -> %d events", len(symbols), len(rows))
+    return {"data": rows}
 
 
 # ---------------- 腾讯行情源 (qt.gtimg.cn, 实时+五档共用) ----------------
