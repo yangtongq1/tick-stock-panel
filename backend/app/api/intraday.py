@@ -129,6 +129,50 @@ def status(request: Request):
             "quote_age_ms": None, "is_trading_hours": False, "last_fetch_ms": None}
 
 
+@router.get("/quotes")
+def market_quotes(
+    request: Request,
+    symbols: str | None = Query(None, description="逗号分隔的股票 symbol 列表; 省略 = 全市场"),
+):
+    """全市场行情快照 (只读内存缓存, 不触发上游拉取)。
+
+    供外部系统 (如 QUANT TERMINAL / 10.2.207.117) 拉取 TSP 实时行情:
+    - 无 symbols: 返回全市场快照 (约 5887 只)
+    - 有 symbols: 只返回指定标的
+    返回行含 symbol/name/last_price/prev_close/open/high/low/volume/amount/
+    change_pct/change_amount/amplitude/turnover_rate。
+    """
+    qs = _get_quote_service(request)
+    if qs is None:
+        return {"rows": [], "count": 0, "as_of": None, "source": "unavailable"}
+
+    import polars as pl
+
+    df = qs.get_quotes_compat()
+    if df.is_empty():
+        return {"rows": [], "count": 0, "as_of": None, "source": "warming_up"}
+
+    if symbols:
+        wanted = [s.strip() for s in symbols.split(",") if s.strip()]
+        df = df.filter(pl.col("symbol").is_in(wanted))
+
+    # 名称列: 从 enriched 缓存补 (若有)
+    try:
+        df_e, _ = qs.get_enriched_today()
+        if not df_e.is_empty() and "name" in df_e.columns:
+            df = df.join(df_e.select("symbol", "name").unique(subset="symbol"), on="symbol", how="left")
+    except Exception:  # noqa: BLE001
+        pass
+
+    rows = df.to_dicts()
+    return {
+        "rows": rows,
+        "count": len(rows),
+        "as_of": int(time.time() * 1000),
+        "source": "realtime",
+    }
+
+
 @router.get("/indices")
 def index_quotes(
     request: Request,
