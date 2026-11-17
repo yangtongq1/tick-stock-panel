@@ -117,6 +117,7 @@ datasets:
     field_map:
       symbol: symbol
       period_end: period_end
+      announce_date: announce_date
       eps_basic: eps_basic
       roe: roe
       gross_margin: gross_margin

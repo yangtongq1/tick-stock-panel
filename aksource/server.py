@@ -633,6 +633,23 @@ def _fin_years() -> list[int]:
     return [datetime.now().year - i for i in range(4)]
 
 
+def _announce_deadline(period_end: str) -> str:
+    """按报告期推 A 股法定最晚披露日 (公告日上界, 宁晚勿早 → 无未来函数)。
+
+    Q1(03-31)→04-30, Q2(06-30)→08-31, Q3(09-30)→10-31, Q4(12-31)→次年04-30。
+    新浪指标页无公告日字段, 用法定时限做保守近似; 实际公告日更早,
+    因子可见时点最多晚 1-2 个月, 但绝不会提前看到未披露数据。
+    """
+    y, m = int(period_end[:4]), int(period_end[5:7])
+    if m == 3:
+        return f"{y}-04-30"
+    if m == 6:
+        return f"{y}-08-31"
+    if m == 9:
+        return f"{y}-10-31"
+    return f"{y + 1}-04-30"
+
+
 def financial_metrics_rows(sym: str) -> list[dict]:
     """指标页网页版解析: 每年一页, 行=指标, 列=报告期 → 转置成 (period_end, 指标) 行。"""
     code = sym.split(".")[0]
@@ -671,7 +688,10 @@ def financial_metrics_rows(sym: str) -> list[dict]:
         for i, p in enumerate(periods):
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", p):
                 continue
-            row = out.setdefault(p, {"symbol": sym, "period_end": p})
+            row = out.setdefault(p, {
+                "symbol": sym, "period_end": p,
+                "announce_date": _announce_deadline(p),
+            })
             for src, dst in guide_rows.items():
                 if src in data:
                     row[dst] = _num(data[src][i])
@@ -708,6 +728,28 @@ def financial_sheet_rows(sym: str, sheet: str, rows_map: dict[str, str]) -> list
     return [out[p] for p in sorted(out, reverse=True)]
 
 
+def _fin_scope_filter(symbols: list[str]) -> list[str]:
+    """财务同步范围过滤: 除北交所/科创板(688)/创业板(30*)/ST。
+
+    用户约定 (2026-11-17): 财务与除权因子全量同步限定主板标的,
+    约 3239 只。ST 用全市场快照名称判断 (90s 刷新, 覆盖足够新)。
+    """
+    out = []
+    for s in symbols:
+        if s.endswith(".BJ") or s.startswith("688") or s.startswith("30"):
+            continue
+        out.append(s)
+    # ST 过滤: 名称含 ST (快照 by_symbol 里有 name)
+    st_set = set()
+    for s in out:
+        row = _FULL_RT_STATE["by_symbol"].get(s)
+        if row and "ST" in str(row.get("name", "")).upper():
+            st_set.add(s)
+    if st_set:
+        log.info("financial scope: filter %d ST symbols", len(st_set))
+    return [s for s in out if s not in st_set]
+
+
 @app.post("/financial")
 def financial(req: BatchReq) -> dict:
     """财务数据: table=metrics/income/balance_sheet/cash_flow (新浪财务页)。
@@ -715,6 +757,7 @@ def financial(req: BatchReq) -> dict:
     shares 表新浪无对应接口 → 返回空 (TSP 侧合并写入保留存量)。
     vDOWN 全报告期一次拿齐, latest 参数不影响返回行数 (TSP 侧自行按
     period_end 合并); metrics 指标页按年拉 4 年。
+    范围过滤: 北交所/科创板/创业板/ST 之外的主板标的。
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -722,7 +765,7 @@ def financial(req: BatchReq) -> dict:
     if table == "shares":
         return {"data": []}
 
-    symbols = req.symbols[:100]
+    symbols = _fin_scope_filter(req.symbols[:100])
 
     def fetch_one(sym: str) -> list[dict]:
         try:
