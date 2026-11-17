@@ -27,7 +27,16 @@ for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY",
 os.environ.setdefault("NO_PROXY", "*")
 
 import pandas as pd  # noqa: E402
-import requests  # noqa: E402
+try:  # requests 优先; 环境只有 httpx 时 (TSP backend venv) 自动降级
+    import requests as _requests_mod
+    _requests_exc = (_requests_mod.RequestException,)
+    def _http_get_raw(url: str, headers: dict, timeout: float):
+        return _requests_mod.get(url, headers=headers, timeout=timeout)
+except ImportError:  # httpx 兼容层
+    import httpx as _requests_mod  # type: ignore[no-redef]
+    _requests_exc = (Exception,)
+    def _http_get_raw(url: str, headers: dict, timeout: float):
+        return _requests_mod.get(url, headers=headers, timeout=timeout)
 from fastapi import FastAPI  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -54,7 +63,7 @@ def http_get(url: str, retries: int = 3, timeout: float = 6.0) -> str | None:
     backoff = 0.3
     for i in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            r = _http_get_raw(url, HEADERS, timeout)
             if r.status_code == 200:
                 if not r.content.strip():
                     return "[]"
@@ -62,7 +71,7 @@ def http_get(url: str, retries: int = 3, timeout: float = 6.0) -> str | None:
                     return r.content.decode("gbk", errors="replace")
                 except UnicodeDecodeError:
                     return r.text
-        except requests.RequestException:
+        except _requests_exc:
             pass
         if i < retries - 1:
             time.sleep(backoff)
@@ -562,15 +571,178 @@ def depth5(req: BatchReq) -> dict:
     return {"data": rows}
 
 
-# ---------------- 财务 (新浪财务指标, HTTP 接口) ----------------
+# ---------------- 财务 (新浪财务页: 指标页网页版 + 三大报表 vDOWN 下载版) ----------------
+# 网络实测 (2026-11-17): HTTPS 出站已恢复, 新浪财务接口可用。
+#   指标页   https://money.finance.sina.com.cn/corp/go.php/vFD_FinancialGuideLine/stockid/{code}/ctrl/{year}/displaytype/4.phtml
+#            (网页版可达; vDOWN_FinancialGuideLine 恒 0B 不可用)
+#   利润表   vDOWN_ProfitStatement (vFD_ProfitSheet 网页版恒 0B, 下载版正常)
+#   资产负债表 vDOWN_BalanceSheet (网页版与下载版均可, 统一走下载版)
+#   现金流量表 vDOWN_CashFlow
+# vDOWN 一次返回全部报告期 (2020 至今), 单只 ~0.3s。
+SINA_FIN_GUIDE = "https://money.finance.sina.com.cn/corp/go.php/vFD_FinancialGuideLine/stockid/{code}/ctrl/{year}/displaytype/4.phtml"
+SINA_VDOWN = "https://money.finance.sina.com.cn/corp/go.php/vDOWN_{sheet}/displaytype/4/stockid/{code}/ctrl/all.phtml"
+
+# vDOWN 报表行名 → TSP canonical 列 (对照 fuyao provider 字段映射, 单位: 元)
+_INCOME_ROWS = {
+    "营业收入": "revenue",
+    "营业成本": "operating_cost",
+    "销售费用": "selling_expense",
+    "管理费用": "admin_expense",
+    "研发费用": "rd_expense",
+    "三、营业利润": "operating_profit",
+    "财务费用": "financial_expense",
+    "四、利润总额": "total_profit",
+    "减：所得税费用": "income_tax",
+    "五、净利润": "net_income",
+    "归属于母公司所有者的净利润": "net_income_attributable",
+    "基本每股收益(元/股)": "basic_eps",
+}
+_BALANCE_ROWS = {
+    "货币资金": "cash_and_equivalents",
+    "应收账款": "accounts_receivable",
+    "流动资产合计": "total_current_assets",
+    "非流动资产合计": "total_non_current_assets",
+    "资产总计": "total_assets",
+    "负债合计": "total_liabilities",
+    "归属于母公司股东权益合计": "total_equity",
+}
+_CASHFLOW_ROWS = {
+    "经营活动产生的现金流量净额": "net_operating_cash_flow",
+    "投资活动产生的现金流量净额": "net_investing_cash_flow",
+    "筹资活动产生的现金流量净额": "net_financing_cash_flow",
+    "购建固定资产、无形资产和其他长期资产所支付的现金": "capex",
+    "五、现金及现金等价物净增加额": "net_cash_change",
+}
+
+
+def _num(text: str | None) -> float | None:
+    """'1,234.56' → 1234.56; '--'/'' → None"""
+    if text is None:
+        return None
+    t = text.strip().replace(",", "")
+    if not t or t == "--":
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _fin_years() -> list[int]:
+    """指标页按年拉: 近 4 年足够覆盖 TSP 历史累积需求"""
+    return [datetime.now().year - i for i in range(4)]
+
+
+def financial_metrics_rows(sym: str) -> list[dict]:
+    """指标页网页版解析: 每年一页, 行=指标, 列=报告期 → 转置成 (period_end, 指标) 行。"""
+    code = sym.split(".")[0]
+    # 行名 → TSP 列 (新浪百分数值原样保留, TSP 因子按 % 消费)
+    guide_rows = {
+        "摊薄每股收益(元)": "eps_basic",
+        "加权净资产收益率(%)": "roe",
+        "主营业务利润率(%)": "gross_margin",
+        "销售净利率(%)": "net_margin",
+        "资产负债率(%)": "debt_to_asset_ratio",
+        "主营业务收入增长率(%)": "revenue_yoy",
+        "净利润增长率(%)": "net_income_yoy",
+        "每股净资产_调整后(元)": "bps",
+    }
+    out: dict[str, dict] = {}
+    for year in _fin_years():
+        html = http_get(SINA_FIN_GUIDE.format(code=code, year=year), retries=2, timeout=15.0)
+        if not html or "FinancialGuideLine" not in html and "财务指标" not in html:
+            continue
+        m = re.search(r'<table[^>]*id="BalanceSheetNewTable0"[^>]*>(.*?)</table>', html, re.S)
+        if not m:
+            continue
+        periods: list[str] = []
+        data: dict[str, list[str | None]] = {}
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", m.group(1), re.S):
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)
+            cells = [re.sub(r"<[^>]+>|\s+", "", c).strip() for c in cells]
+            if not cells:
+                continue
+            if cells[0] == "报告日期":
+                periods = [c for c in cells[1:] if c]
+                continue
+            if cells[0] in guide_rows:
+                vals = cells[1:]
+                data[cells[0]] = [vals[i] if i < len(vals) else None for i in range(len(periods))]
+        for i, p in enumerate(periods):
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", p):
+                continue
+            row = out.setdefault(p, {"symbol": sym, "period_end": p})
+            for src, dst in guide_rows.items():
+                if src in data:
+                    row[dst] = _num(data[src][i])
+    # 过滤全空指标行 (只有 symbol/period_end 无任何数值)
+    return [r for r in out.values() if any(v is not None for k, v in r.items() if k not in ("symbol", "period_end"))]
+
+
+def financial_sheet_rows(sym: str, sheet: str, rows_map: dict[str, str]) -> list[dict]:
+    """vDOWN 下载版解析: TSV, 首行=报表日期, 后续行=科目 → 转置成 (period_end, 科目) 行。"""
+    code = sym.split(".")[0]
+    text = http_get(SINA_VDOWN.format(sheet=sheet, code=code), retries=2, timeout=20.0)
+    if not text or "报表日期" not in text:
+        return []
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 3:
+        return []
+    header = lines[0].split("\t")
+    periods = [p for p in header[1:] if re.fullmatch(r"\d{8}", p)]
+    if not periods:
+        return []
+    # 列对齐: header 第 1..N 列对应 periods
+    out: dict[str, dict] = {}
+    for ln in lines[2:]:  # 跳过报表日期行与"单位"行
+        parts = ln.split("\t")
+        name = parts[0].strip()
+        if name not in rows_map:
+            continue
+        for i, p in enumerate(periods):
+            val = _num(parts[i + 1]) if i + 1 < len(parts) else None
+            if val is None:
+                continue
+            row = out.setdefault(p, {"symbol": sym, "period_end": f"{p[:4]}-{p[4:6]}-{p[6:8]}"})
+            row[rows_map[name]] = val
+    return [out[p] for p in sorted(out, reverse=True)]
+
+
 @app.post("/financial")
 def financial(req: BatchReq) -> dict:
+    """财务数据: table=metrics/income/balance_sheet/cash_flow (新浪财务页)。
+
+    shares 表新浪无对应接口 → 返回空 (TSP 侧合并写入保留存量)。
+    vDOWN 全报告期一次拿齐, latest 参数不影响返回行数 (TSP 侧自行按
+    period_end 合并); metrics 指标页按年拉 4 年。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    table = req.table or "metrics"
+    if table == "shares":
+        return {"data": []}
+
+    symbols = req.symbols[:100]
+
+    def fetch_one(sym: str) -> list[dict]:
+        try:
+            if table == "metrics":
+                return financial_metrics_rows(sym)
+            if table == "income":
+                return financial_sheet_rows(sym, "ProfitStatement", _INCOME_ROWS)
+            if table == "balance_sheet":
+                return financial_sheet_rows(sym, "BalanceSheet", _BALANCE_ROWS)
+            if table == "cash_flow":
+                return financial_sheet_rows(sym, "CashFlow", _CASHFLOW_ROWS)
+        except Exception as e:  # noqa: BLE001
+            log.warning("financial %s %s fail: %s", table, sym, e)
+        return []
+
     rows: list[dict] = []
-    for sym in req.symbols[:80]:
-        code = sym.split(".")[0]
-        # 新浪财务接口: https 需要, 当前网络 HTTPS 不通 → 留空回退官方源
-        # 待网络恢复后可改走 akshare
-        _ = code
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        for r in ex.map(fetch_one, symbols):
+            rows.extend(r)
+    log.info("financial %s %d syms -> %d rows", table, len(symbols), len(rows))
     return {"data": rows}
 
 
