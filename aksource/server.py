@@ -125,6 +125,31 @@ def adj_factor(req: BatchReq) -> dict:
 # ---------------- 腾讯行情源 (qt.gtimg.cn, 实时+五档共用) ----------------
 QT_QUOTE = "http://qt.gtimg.cn/q="
 
+# 指数行情: TSP CORE_INDEX_SYMBOLS(核心四只) + BENCHMARK_INDEX_SYMBOLS(板块基准)
+# 自定义 YAML 源无法实现插件协议的 get_realtime_indices(), 指数走全市场快照内嵌:
+# TSP _process_full_market_records 按 symbol 集合自动分流 index 记录
+INDEX_SYMBOLS = [
+    "000001.SH",  # 上证指数
+    "399001.SZ",  # 深证成指
+    "399006.SZ",  # 创业板指
+    "000680.SH",  # 科创综指
+    "000002.SH",  # A股指数 (SH 基准)
+    "000688.SH",  # 科创50 (STAR 基准)
+    "399107.SZ",  # 深证A指 (SZ/GEM 基准)
+    "399102.SZ",  # 创业板综 (GEM 基准)
+    "899050.BJ",  # 北证50 (BJ 基准)
+]
+
+
+def parse_qt_index(sym: str, text: str) -> dict | None:
+    """解析腾讯指数行情 (字段布局与个股相同, 指数无换手/量纲不同)"""
+    row = parse_qt(sym, text)
+    if row is None:
+        return None
+    # 指数成交量单位为手(百股), 金额为万元; 指数无换手率/振幅语义, 置 0
+    row["turnover_rate"] = 0.0
+    return row
+
 
 # ---------------- 实时快照 (腾讯 qt, 单股 5s TTL + 全市场后台刷新) ----------------
 
@@ -176,6 +201,8 @@ def _refresh_full_market() -> None:
     t0 = time.time()
     sina_syms = [to_sina(s) for s in symbols]
     batches = [sina_syms[i:i + 30] for i in range(0, len(sina_syms), 30)]
+    # 指数并进同一批刷新 (指数 9 只单独一批, 腾讯指数代码与个股同接口)
+    batches.append([to_sina(s) for s in INDEX_SYMBOLS])
     raw_map: dict[str, str] = {}
     errors = 0
 
@@ -208,18 +235,29 @@ def _refresh_full_market() -> None:
             rows.append(row)
             by_symbol[sym] = row
 
+    # 指数行情 (与个股同字段布局, TSP 按 symbol 集合自动分流为 index)
+    index_rows: list[dict] = []
+    for sym in INDEX_SYMBOLS:
+        body = raw_map.get(to_sina(sym))
+        if not body:
+            continue
+        row = parse_qt_index(sym, body)
+        if row:
+            index_rows.append(row)
+            by_symbol[sym] = row
+
     with _FULL_RT_LOCK:
         if rows:
-            _FULL_RT_STATE["rows"] = rows
+            _FULL_RT_STATE["rows"] = rows + index_rows
             _FULL_RT_STATE["by_symbol"] = by_symbol
             _FULL_RT_STATE["last_ok"] = time.time()
             _FULL_RT_STATE["refresh_count"] += 1
         _FULL_RT_STATE["errors"] = errors
         _FULL_RT_STATE["refreshing"] = False
     log.info(
-        "full-market refresh #%d: %d/%d rows in %.1fs (%d batch errors)",
+        "full-market refresh #%d: %d/%d rows + %d indices in %.1fs (%d batch errors)",
         _FULL_RT_STATE["refresh_count"], len(rows), len(symbols),
-        time.time() - t0, errors,
+        len(index_rows), time.time() - t0, errors,
     )
 
 
