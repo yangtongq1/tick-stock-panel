@@ -27,7 +27,7 @@ datasets:
     method: POST
     batch: 20
     rpm: 10
-    timeout: 600.0
+    timeout: 300.0
     response_path: data
     field_map:
       symbol: symbol
@@ -112,7 +112,7 @@ datasets:
     method: POST
     batch: 50
     rpm: 30
-    timeout: 600.0
+    timeout: 300.0
     response_path: data
     field_map:
       symbol: symbol
