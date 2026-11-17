@@ -98,10 +98,27 @@ def sync_instruments(data_dir: Path) -> int:
         return 0
 
     df = pl.DataFrame(all_rows)
+
+    # 完整性保护: 拉取部分失败时 (如 TickFlow SZ 503 只拿到 SH+BJ) 不能用
+    # 残缺数据覆盖全量表 — 2026-11-17 实证 SZ 全丢, 全市场 5892 只变 2824。
+    # 现有表更全时保留现有表, 只做警告。
+    out = data_dir / "instruments" / "instruments.parquet"
+    if out.exists():
+        try:
+            existing = pl.read_parquet(out)
+            if not existing.is_empty() and df.height < existing.height * 0.9:
+                logger.warning(
+                    "instruments sync aborted: fetched %d rows < 90%% of existing %d "
+                    "(partial upstream failure), keeping existing table",
+                    df.height, existing.height,
+                )
+                return existing.height
+        except Exception:  # noqa: BLE001
+            pass
+
     df = _preserve_instrument_fields(df, data_dir)
     df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
 
-    out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_parquet(df, out)
 
