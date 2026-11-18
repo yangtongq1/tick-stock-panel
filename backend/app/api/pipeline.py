@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures as _cf
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -92,6 +93,15 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
             result = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
             job_store.succeed(job_id, result)
             invalidate_storage_cache()
+            # 行情增量发布到 GitHub (best-effort): 手动触发管道成功后同样自动推送,
+            # 与盘后 cron 路径共用幂等实现 (无变更即跳过)。阻塞 git 走 executor。
+            try:
+                from app.services.data_publish import run_after_pipeline as _publish_data
+
+                await loop.run_in_executor(
+                    _long_task_executor, _publish_data, Path(repo.store.data_dir))
+            except Exception:  # noqa: BLE001
+                logger.exception("data publish after manual pipeline failed (job remains succeeded)")
         except JobCancelledError:
             # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
             # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。

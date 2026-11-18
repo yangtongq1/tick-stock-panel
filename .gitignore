@@ -30,6 +30,8 @@ node_modules/
 # ===== Vite =====
 frontend/dist/
 frontend/.vite/
+frontend/vite.config.d.ts
+frontend/vite.config.ts.timestamp-*
 backend/static/
 backend/app/static/
 

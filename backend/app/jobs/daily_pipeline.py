@@ -1087,6 +1087,14 @@ def _scheduled_pipeline_task(pipeline_fn) -> None:
         logger.exception(
             "scheduled lab enqueue failed; daily pipeline remains succeeded"
         )
+    # 行情增量发布到 GitHub (clone 即得行情的写入端): 无 git/无变更/推送失败
+    # 都只记日志, 绝不影响管道结果。run_after_pipeline 内部已吞异常。
+    try:
+        from app.services.data_publish import run_after_pipeline as _publish_data
+
+        _publish_data(Path(settings.data_dir))
+    except Exception:
+        logger.exception("data publish hook failed; daily pipeline remains succeeded")
 
 
 # ================================================================
