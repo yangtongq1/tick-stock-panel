@@ -1,9 +1,9 @@
 ﻿# tick-stock-panel 一键部署脚本 (Windows PowerShell)
 # 目标: git clone 后只需这一条命令 → 浏览器打开 http://localhost:3018 即是完整系统
-# (行情数据随仓库分发, 无需拉取; 前端构建一次, 之后不再需要 Node 常驻)
+# 前端构建产物 (frontend/dist) 与行情数据均随仓库分发 → 运行只需 Python, 无需 Node
 #
-# 用法:  .\quick-start.ps1          首次/日常启动 (幂等: 已装依赖/已构建自动跳过)
-#        .\quick-start.ps1 -Rebuild 强制重建前端
+# 用法:  .\quick-start.ps1          首次/日常启动 (幂等)
+#        .\quick-start.ps1 -Rebuild 重建前端 (需要 Node 20+; 仅改前端代码时用)
 param([switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -27,7 +27,6 @@ function Invoke-Native($File, $ArgList) {
 
 Write-Host "== 1/5 依赖检查 ==" -ForegroundColor Cyan
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) { throw "缺少 Python 3.11+ (winget install Python.Python.3.12)" }
-if (-not (Get-Command node -ErrorAction SilentlyContinue))   { throw "缺少 Node 20+ (winget install OpenJS.NodeJS.LTS)" }
 
 # uv (Python 依赖管理)
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
@@ -38,12 +37,6 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { throw "uv 安装后不可用, 请新开终端重跑" }
 }
 
-# pnpm (仅构建前端时需要, 不常驻)
-if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-  Write-Host "安装 pnpm..."
-  Invoke-Native npm @('i', '-g', 'pnpm')
-}
-
 Write-Host "== 2/5 配置 ==" -ForegroundColor Cyan
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
@@ -52,15 +45,26 @@ Push-Location backend
 Invoke-Native uv @('sync')
 Pop-Location
 
-Write-Host "== 4/5 前端构建 (一次, 之后不再需要 Node) ==" -ForegroundColor Cyan
-$needBuild = $Rebuild -or -not (Test-Path "frontend\dist\index.html")
-if ($needBuild) {
+Write-Host "== 4/5 前端 ==" -ForegroundColor Cyan
+if ($Rebuild -or -not (Test-Path "frontend\dist\index.html")) {
+  # 重建前端才需要 Node 工具链 (npm 安装路径多样且易损坏, pnpm 官方独立安装器最稳)
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "重建前端需要 Node 20+ (winget install OpenJS.NodeJS.LTS); 或不传 -Rebuild 直接用仓库自带构建产物" }
+  if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+    Write-Host "安装 pnpm (官方独立安装器, 不依赖 npm)..."
+    Invoke-Native powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "Invoke-WebRequest -Uri https://get.pnpm.io/install.ps1 -UseBasicParsing | Invoke-Expression")
+    $env:PATH = "$env:USERPROFILE\AppData\Local\pnpm;$env:PATH"
+    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+      Write-Host "独立安装器未生效, 回退 npm i -g pnpm..."
+      Invoke-Native npm @('i', '-g', 'pnpm')
+    }
+  }
   Push-Location frontend
   Invoke-Native pnpm @('install', '--silent')
   Invoke-Native pnpm @('build')
   Pop-Location
 } else {
-  Write-Host "已构建, 跳过 (强制重建: .\quick-start.ps1 -Rebuild)"
+  Write-Host "使用仓库自带构建产物, 跳过 (重建: .\quick-start.ps1 -Rebuild, 需 Node)"
 }
 
 # ---- 5/5 三件套: aksource 3021 + 后端 3018 (直接伺服前端) ----
@@ -109,7 +113,7 @@ Write-Host "======================================" -ForegroundColor Green
 Write-Host " 系统已就绪 → http://localhost:3018"
 Write-Host " (页面+API 同一地址; 局域网用本机 IP:3018)"
 Write-Host " 数据源 http://localhost:3021 (免费: 实时/分钟/板块/财务)"
-Write-Host " 行情数据随仓库自带, 开箱即用"
+Write-Host " 行情+前端构建产物随仓库自带, 开箱即用"
 Write-Host " 停止: 任务管理器结束 python (uvicorn/server.py) 即可"
 Write-Host "======================================" -ForegroundColor Green
 

@@ -1,5 +1,5 @@
 node_modules
-dist
 .vite
 *.log
 .DS_Store
+# dist 不忽略: 构建产物随 git 分发, 其他电脑 clone 即得已构建前端

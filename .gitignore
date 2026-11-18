@@ -13,8 +13,9 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
-dist/
-build/
+# Python 打包产物 (不通用匹配 dist/, 避免误伤 frontend/dist 随仓库分发)
+backend/dist/
+backend/build/
 *.egg-info/
 
 # ===== uv =====
@@ -28,7 +29,8 @@ node_modules/
 *.log
 
 # ===== Vite =====
-frontend/dist/
+# frontend/dist/ 不再忽略: 构建产物随 git 分发 (~7MB), 其他电脑 clone 即得
+# 已构建前端, 无需 Node/npm/pnpm 即可运行 (改前端才需要重建, 用 -Rebuild)
 frontend/.vite/
 frontend/vite.config.d.ts
 frontend/vite.config.ts.timestamp-*

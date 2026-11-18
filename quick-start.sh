@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # tick-stock-panel 一键部署脚本 (Linux / macOS / Git Bash)
 # 目标: git clone 后只需这一条命令 → 浏览器打开 http://localhost:3018 即是完整系统
-# (行情数据随仓库分发, 无需拉取; 前端构建一次, 之后不再需要 Node 常驻)
+# 前端构建产物 (frontend/dist) 与行情数据均随仓库分发 → 运行只需 Python, 无需 Node
 #
-# 用法:  ./quick-start.sh           首次/日常启动 (幂等: 已装依赖/已构建自动跳过)
-#        ./quick-start.sh rebuild   强制重建前端
+# 用法:  ./quick-start.sh           首次/日常启动 (幂等)
+#        ./quick-start.sh rebuild   重建前端 (需要 Node 20+; 仅改前端代码时用)
 set -e
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -12,7 +12,6 @@ REBUILD="${1:-}"
 
 echo "== 1/5 依赖检查 =="
 command -v python3 >/dev/null || { echo "缺少 Python 3.11+"; exit 1; }
-command -v node >/dev/null || { echo "缺少 Node 20+"; exit 1; }
 
 # uv (Python 依赖管理)
 if ! command -v uv >/dev/null; then
@@ -21,23 +20,25 @@ if ! command -v uv >/dev/null; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# pnpm (仅构建前端时需要, 不常驻)
-if ! command -v pnpm >/dev/null; then
-  echo "安装 pnpm..."
-  npm i -g pnpm
-fi
-
 echo "== 2/5 配置 =="
 [ -f .env ] || cp .env.example .env
 
 echo "== 3/5 后端依赖 =="
 (cd backend && uv sync)
 
-echo "== 4/5 前端构建 (一次, 之后不再需要 Node) =="
+echo "== 4/5 前端 =="
 if [ "$REBUILD" = "rebuild" ] || [ ! -f frontend/dist/index.html ]; then
+  # 重建前端才需要 Node 工具链
+  command -v node >/dev/null || { echo "重建前端需要 Node 20+; 不传 rebuild 参数可直接用仓库自带构建产物"; exit 1; }
+  if ! command -v pnpm >/dev/null; then
+    echo "安装 pnpm (官方独立安装器, 不依赖 npm)..."
+    curl -fsSL https://get.pnpm.io/install.sh | sh - || npm i -g pnpm
+    export PATH="$HOME/.local/share/pnpm:$PATH"
+    command -v pnpm >/dev/null || npm i -g pnpm
+  fi
   (cd frontend && pnpm install --silent && pnpm build)
 else
-  echo "已构建, 跳过 (强制重建: ./quick-start.sh rebuild)"
+  echo "使用仓库自带构建产物, 跳过 (重建: ./quick-start.sh rebuild, 需 Node)"
 fi
 
 # ---- 5/5 三件套: aksource 3021 + 后端 3018 (直接伺服前端) ----
@@ -82,7 +83,7 @@ echo "======================================"
 echo " 系统已就绪 → http://localhost:3018"
 echo " (页面+API 同一地址; 局域网用本机 IP:3018)"
 echo " 数据源 http://localhost:3021 (免费: 实时/分钟/板块/财务)"
-echo " 行情数据随仓库自带, 开箱即用"
+echo " 行情+前端构建产物随仓库自带, 开箱即用"
 echo " 停止: pkill -f uvicorn / pkill -f server.py 即可"
 echo "======================================"
 
