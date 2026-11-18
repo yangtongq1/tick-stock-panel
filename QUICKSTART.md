@@ -23,6 +23,8 @@ cd tick-stock-panel
 ./quick-start.sh          # Windows PowerShell: .\quick-start.ps1
 ```
 
+Windows 也可直接**双击 `start.bat`**（等价于 `.\quick-start.ps1`，同样支持 `-Rebuild` 参数）。
+
 脚本幂等，自动完成五步（已装/已建自动跳过，日常启动秒过）：
 
 1. 检查/安装依赖（Python 3.11+、Node 20+、uv、pnpm）
