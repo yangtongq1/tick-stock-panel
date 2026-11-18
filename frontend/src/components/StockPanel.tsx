@@ -203,8 +203,14 @@ export function StockPanel({
     : undefined
   if (!symbol) return null
 
-  // 财务指标最新一期（metrics 按 period_end 排序，取首项）
-  const financialMetrics: FinancialMetricRecord | undefined = financials.data?.data?.[0]
+  // 财务指标最新一期。API 按 period_end 升序返回（见 api/financials.py get_metrics，
+  // 未排序直接读 parquet 物理行序），须显式取 period_end 最大的一期；
+  // 直接 data[0] 会拿到 2023 年最旧一期，导致 EPS/PE/PB 展示三年前数据。
+  const financialMetrics: FinancialMetricRecord | undefined =
+    financials.data?.data?.reduce<FinancialMetricRecord | undefined>(
+      (latest, row) => (!latest || String(row.period_end ?? '') > String(latest.period_end ?? '') ? row : latest),
+      undefined,
+    )
 
   return (
     <div className={className}>

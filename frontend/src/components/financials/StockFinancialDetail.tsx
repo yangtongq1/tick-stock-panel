@@ -171,9 +171,14 @@ export function StockFinancialDetail({ symbol, name }: Props) {
   )
   const fieldDefs = FIELD_DEFS[tab]
 
-  // 头部报告期信息取最新一期(优先用当前 tab,兜底用 metrics)
-  const latestPeriod = rows[0]?.period_end ?? metrics.data?.data?.[0]?.period_end ?? null
-  const latestAnnounce = rows[0]?.announce_date ?? metrics.data?.data?.[0]?.announce_date ?? null
+  // 头部报告期信息取最新一期(优先用当前 tab,兜底用 metrics 显式取 period_end 最大期;
+  // metrics API 按 period_end 升序返回, 直接 data[0] 会取到最旧一期)
+  const metricsLatest = (metrics.data?.data ?? []).reduce<Record<string, string> | undefined>(
+    (latest, row) => (!latest || String(row.period_end ?? '') > String(latest.period_end ?? '') ? (row as Record<string, string>) : latest),
+    undefined,
+  )
+  const latestPeriod = rows[0]?.period_end ?? metricsLatest?.period_end ?? null
+  const latestAnnounce = rows[0]?.announce_date ?? metricsLatest?.announce_date ?? null
 
   return (
     <div className="rounded-card border border-border bg-surface overflow-hidden">
