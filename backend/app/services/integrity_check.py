@@ -18,7 +18,7 @@ ASSET_LABELS = {"stock": "股票", "etf": "ETF", "index": "指数"}
 KIND_LABELS = {
     "missing": "日期缺失", "snapshot": "盘中快照未定版", "corrupt": "文件损坏或为空",
     "invalid": "日K数值异常", "unconfirmed": "缺失日期待核实",
-    "recompute": "依赖指标待重算",
+    "thin": "覆盖稀疏 (半截分区)", "recompute": "依赖指标待重算",
 }
 
 

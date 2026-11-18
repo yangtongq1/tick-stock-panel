@@ -52,6 +52,12 @@ AUTO_REPAIR_MAX_LAG_DAYS = 5
 # 参与检测的日K族表 (实时 flush 会写这三族的 daily/enriched)
 _DAILY_TABLES = ("kline_daily", "kline_etf_daily", "kline_index_daily")
 
+# 覆盖率判定 (thin): 单日行数低于近 5 个交易日中位数的 COVERAGE_FLOOR_RATIO
+# 即视为「稀疏分区」— 分区存在且行合法, 但大半市场缺失 (如 2026-11-16 仅
+# 828/5571: 盘后管道中途失败留下的半截数据)。仅 deep 扫描判定。
+COVERAGE_FLOOR_RATIO = 0.90
+_COVERAGE_BASELINE_DAYS = 5
+
 # 表 → 资产族 (用于管道/修复侧按族取起点)
 TABLE_FAMILY = {
     "kline_daily": "stock",
@@ -64,7 +70,7 @@ TABLE_FAMILY = {
 class IntegrityIssue:
     day: date
     table: str
-    kind: str  # snapshot / missing / corrupt / invalid / unconfirmed
+    kind: str  # snapshot / missing / corrupt / invalid / unconfirmed / thin
     # snapshot 且能定位时: 缺权威行(batch)的 symbol 清单 (修复只拉这些);
     # 空 = 干净或无法定位 (missing / 列缺失 / 读失败), 修复回退全市场。
     symbols: tuple[str, ...] = ()
@@ -357,7 +363,64 @@ def inspect_daily_partition(data_dir: Path, table: str, day: date, *, deep: bool
     defects = _partition_snapshot_defects(day, part, _quote_ts_max_ms(part))
     if defects is None or defects:
         return IntegrityIssue(day, table, "snapshot", symbols=tuple(sorted(defects)) if defects else ())
+    if deep and (thin := _partition_is_thin(Path(data_dir), table, day)):
+        floor, actual = thin
+        return IntegrityIssue(
+            day, table, "thin",
+            reason=f"覆盖稀疏: 仅 {actual} 只标的, 远低于近期正常水平 (阈值 {floor} 只 = 近 {_COVERAGE_BASELINE_DAYS} 日中位数的 {COVERAGE_FLOOR_RATIO:.0%})",
+        )
     return None
+
+
+def _partition_is_thin(data_dir: Path, table: str, day: date) -> tuple[int, int] | None:
+    """单日 symbol 数 vs 近 N 个交易日中位数; 低于阈值返回 (floor, actual)。
+
+    基准用中位数而非最大值: 临近节假日/大面积停牌时单日自然波动不误报;
+    只用 day 之前的分区 (当日自身不进基准)。基准样本不足 3 天不判定
+    (新装机器历史太短, 无从比较)。
+    """
+    base = data_dir / table
+    if not base.is_dir():
+        return None
+    priors: list[tuple[date, int]] = []
+    for part in base.glob("date=*"):
+        try:
+            d = date.fromisoformat(part.name[5:])
+        except ValueError:
+            continue
+        if d >= day:
+            continue
+        n = _partition_symbol_count(part)
+        if n:
+            priors.append((d, n))
+    if len(priors) < 3:
+        return None
+    priors.sort()
+    counts = sorted(n for _, n in priors[-_COVERAGE_BASELINE_DAYS:])
+    baseline = counts[len(counts) // 2]
+    if baseline <= 0:
+        return None
+    floor = max(1, int(baseline * COVERAGE_FLOOR_RATIO))
+    actual = _partition_symbol_count(base / f"date={day}")
+    if actual is not None and actual < floor:
+        return floor, actual
+    return None
+
+
+def _partition_symbol_count(part_dir: Path) -> int | None:
+    """分区 symbol 数 (只读 symbol 单列去重; 文件缺失/无 symbol 列返回 None)。"""
+    total: set[str] = set()
+    found_any = False
+    for path in sorted(part_dir.glob("*.parquet")):
+        try:
+            syms = pl.read_parquet(path, columns=["symbol"])["symbol"].unique()
+            total.update(syms)
+            found_any = True
+        except Exception:  # noqa: BLE001
+            return None
+    if not found_any:
+        return None
+    return len(total)
 
 
 def _candidate_days(today: date, lookback_days: int) -> list[date]:

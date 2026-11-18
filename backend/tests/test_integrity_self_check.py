@@ -225,3 +225,63 @@ def test_repair_refuses_linked_daily_directories(tmp_path, monkeypatch, linked_t
     with pytest.raises(ValueError, match="包含链接"):
         integrity_check.run_repair(repo, object(), report["id"])
     assert not calls and original.read_bytes() == b"keep original"
+
+
+# ===== 覆盖率 (thin) 判定: 半截分区不能静默通过 =====
+
+def _write_day_n(root, day, symbols, *, table="kline_daily"):
+    part = root / table / f"date={day}"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": symbols, "date": [day] * len(symbols),
+        "open": [10.0] * len(symbols), "high": [11.0] * len(symbols),
+        "low": [9.0] * len(symbols), "close": [10.0] * len(symbols),
+        "volume": [100.0] * len(symbols), "amount": [1000.0] * len(symbols),
+        "quote_ts": pl.Series([None] * len(symbols), dtype=pl.Int64),
+    }).write_parquet(part / "part.parquet")
+
+
+def test_thin_partition_flagged_in_deep_scan(tmp_path):
+    """半截分区 (盘后管道中途失败): deep 扫描必须抓到。"""
+    full = [f"6000{i:03d}.SH" for i in range(100)]
+    for d in (23, 26, 27, 28):
+        _write_day_n(tmp_path, date(2026, 10, d), full)
+    # 10-29 只剩 10 只 (正常 100 只的 10%)
+    _write_day_n(tmp_path, date(2026, 10, 29), full[:10])
+    issues = data_integrity.scan_recent_integrity(tmp_path, today=TODAY, deep=True)
+    thin = [i for i in issues if i.kind == "thin"]
+    assert len(thin) == 1 and thin[0].day == date(2026, 10, 29)
+    assert "10 只" in thin[0].reason
+
+
+def test_normal_daily_fluctuation_not_thin(tmp_path):
+    """正常停牌波动 (±5%) 不误报。"""
+    full = [f"6000{i:03d}.SH" for i in range(100)]
+    for d in (23, 26, 27, 28):
+        _write_day_n(tmp_path, date(2026, 10, d), full)
+    # 29 日 96 只 (96% > 90% 阈值)
+    _write_day_n(tmp_path, date(2026, 10, 29), full[:96])
+    issues = data_integrity.scan_recent_integrity(tmp_path, today=TODAY, deep=True)
+    assert not [i for i in issues if i.kind == "thin"]
+
+
+def test_thin_history_too_short_skips(tmp_path):
+    """历史不足 3 天无从比较, 不判 thin (新装机器)。"""
+    full = [f"6000{i:03d}.SH" for i in range(100)]
+    _write_day_n(tmp_path, date(2026, 10, 28), full)
+    _write_day_n(tmp_path, date(2026, 10, 29), full[:5])
+    issues = data_integrity.scan_recent_integrity(tmp_path, today=TODAY, deep=True)
+    assert not [i for i in issues if i.kind == "thin"]
+
+
+def test_thin_feeds_full_market_repair():
+    """thin 进修复计划 → 全市场重拉当日 (symbols 为空)。"""
+    from app.services.repair_daily import plan_daily_repair
+
+    issues = [
+        data_integrity.IntegrityIssue(date(2026, 10, 29), "kline_daily", "thin"),
+    ]
+    targets = plan_daily_repair(issues)
+    assert len(targets) == 1
+    assert targets[0].day == date(2026, 10, 29)
+    assert targets[0].symbols is None  # None = 全 universe
