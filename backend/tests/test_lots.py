@@ -196,3 +196,77 @@ def test_upsert_lot_invalid_returns_400(tmp_path, monkeypatch):
         lots_api.upsert_lot(lots_api.LotModel(**_lot(cost_price=0)), request)
     assert ei.value.status_code == 400
     assert "cost_price" in str(ei.value.detail)
+
+
+# ── 模拟盘持仓 → 批次 同步 (lot_pp_* 命名空间) ────────────
+def _positions():
+    return {
+        "600519.SH": {
+            "asset_type": "stock", "qty": 300, "avg_cost": 1500.0,
+            "lots": [{"date": "2026-11-16", "qty": 300}],
+        },
+        "000042.SZ": {
+            "asset_type": "stock", "qty": 100, "avg_cost": 6.28,
+            "lots": [{"date": "2026-11-17", "qty": 100}],
+        },
+    }
+
+
+def test_sync_paper_positions_writes_lots(tmp_path):
+    r = lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+    assert r == {"written": 2, "deleted": 0, "unchanged": 0}
+    lot = lots_domain.load_all(tmp_path)
+    assert {l["symbol"] for l in lot} == {"600519.SH", "000042.SZ"}
+    sym = next(l for l in lot if l["symbol"] == "600519.SH")
+    assert sym["id"].startswith("lot_pp_quant_system_")
+    assert sym["qty"] == 300 and sym["cost_price"] == pytest.approx(1500.0)
+    assert sym["buy_date"] == "2026-11-16"  # 最早批次买入日
+
+
+def test_sync_paper_positions_idempotent(tmp_path):
+    lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+    # 同样的持仓再同步 → 全部 unchanged, 不重写文件
+    r = lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+    assert r == {"written": 0, "deleted": 0, "unchanged": 2}
+
+
+def test_sync_paper_positions_keeps_user_alert_settings_and_manual_lots(tmp_path):
+    lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+    # 用户在同步批次上补填止盈止损
+    lot_id = lots_domain.paper_lot_id("quant_system", "600519.SH")
+    saved = next(l for l in lots_domain.load_all(tmp_path) if l["id"] == lot_id)
+    saved.update({"target_pct": 10, "stop_pct": 5})
+    lots_domain.save_one(tmp_path, saved)
+    # 用户手动登记的批次
+    manual = _lot(id="lot_manual1", symbol="300750.SZ")
+    lots_domain.save_one(tmp_path, lots_domain.normalize_lot(manual))
+
+    r = lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+
+    assert r["unchanged"] == 2  # 补填的参数保留 → 批次仍视为不变
+    kept = next(l for l in lots_domain.load_all(tmp_path) if l["id"] == lot_id)
+    assert kept["target_pct"] == 10 and kept["stop_pct"] == 5
+    # 手动批次不受影响
+    assert any(l["id"] == "lot_manual1" for l in lots_domain.load_all(tmp_path))
+
+
+def test_sync_paper_positions_removes_closed_and_updates_changed(tmp_path):
+    lots_domain.sync_paper_positions(tmp_path, "quant_system", _positions())
+    # 000042 清仓, 600519 加仓
+    changed = _positions()
+    changed["600519.SH"]["qty"] = 600
+    del changed["000042.SZ"]
+
+    r = lots_domain.sync_paper_positions(tmp_path, "quant_system", changed)
+
+    assert r == {"written": 1, "deleted": 1, "unchanged": 0}
+    symbols = {l["symbol"] for l in lots_domain.load_all(tmp_path)}
+    assert symbols == {"600519.SH"}
+    updated = next(l for l in lots_domain.load_all(tmp_path) if l["symbol"] == "600519.SH")
+    assert updated["qty"] == 600
+
+
+def test_paper_lot_id_namespace_isolates_accounts(tmp_path):
+    a = lots_domain.paper_lot_id("acc_a", "600519.SH")
+    b = lots_domain.paper_lot_id("acc_b", "600519.SH")
+    assert a != b and a.startswith("lot_pp_acc_a_") and b.startswith("lot_pp_acc_b_")

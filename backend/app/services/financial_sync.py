@@ -410,7 +410,7 @@ class FinancialScheduler:
         logger.info("FinancialScheduler stopped")
 
     async def _run_loop(self) -> None:
-        """每周执行一次 metrics 同步。"""
+        """每周执行一次 metrics 同步 (走 run_now 防并发链, 与手动同步互斥)。"""
         try:
             while self._running:
                 # 首次启动等 60s, 之后每 7 天执行一次
@@ -418,11 +418,16 @@ class FinancialScheduler:
                 if not self._running:
                     break
 
-                # 每周: 只同步 metrics
+                # 每周: 只同步 metrics; run_now 持 _is_syncing 防重入,
+                # 手动同步进行中会自动跳过本轮 (返回 {} 只记日志)
                 try:
-                    rows = sync_metrics(self._data_dir, self._capset)
-                    self._record_sync("metrics")
-                    logger.info("FinancialScheduler: metrics synced, %d rows", rows)
+                    rows = await asyncio.to_thread(self.run_now, "metrics")
+                    if rows:
+                        logger.info(
+                            "FinancialScheduler: metrics synced, %d rows", rows.get("metrics", 0)
+                        )
+                    else:
+                        logger.info("FinancialScheduler: metrics skipped (syncing or unavailable)")
                 except Exception as e:
                     logger.warning("FinancialScheduler: metrics sync failed: %s", e)
 

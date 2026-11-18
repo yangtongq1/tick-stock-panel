@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { ArrowUpRight, CalendarClock, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ArrowDownUp, ArrowUpRight, CalendarClock, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { api, type Lot } from '@/lib/api'
 import { fetchDailyBatchChunked } from '@/lib/klineBatchChunked'
 import { QK } from '@/lib/queryKeys'
@@ -51,10 +51,15 @@ export function Lots() {
   const [editing, setEditing] = useState<Lot | null>(null) // null=关闭
   const [confirmId, setConfirmId] = useState<string | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const [syncAccount, setSyncAccount] = useState<string>('')
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const lotsQuery = useQuery({ queryKey: QK.lots, queryFn: api.lotsList })
   const lots = lotsQuery.data?.lots ?? []
+
+  // 模拟盘账户 (「从模拟盘同步」下拉)
+  const accountsQuery = useQuery({ queryKey: QK.paperAccounts, queryFn: api.paperAccounts, staleTime: 60000 })
+  const paperAccounts = accountsQuery.data?.accounts ?? []
 
   const allSymbols = useMemo(() => Array.from(new Set(lots.map(l => l.symbol))), [lots])
   const namesQuery = useQuery({
@@ -99,6 +104,18 @@ export function Lots() {
     },
   })
 
+  // 模拟盘持仓 → 批次同步: 新增/持仓变化写入, 清仓移除; 只管理 pp_* 同步批次
+  const syncPaper = useMutation({
+    mutationFn: (account: string) => api.lotsSyncPaper(account || undefined),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: QK.lots })
+      qc.invalidateQueries({ queryKey: QK.monitorRules })
+      setSyncMsg(`同步完成: 新增/更新 ${res.written} · 移除 ${res.deleted} · 不变 ${res.unchanged}`)
+    },
+    onError: (e: Error) => setSyncMsg(`同步失败: ${e.message}`),
+  })
+  const [syncMsg, setSyncMsg] = useState<string | null>(null)
+
   // 删除: 第一次进确认态, 第二次真删, 3 秒后自动复位 (与监控中心一致)
   const handleClickDelete = (id: string) => {
     if (confirmId === id) {
@@ -118,13 +135,36 @@ export function Lots() {
       <div className="flex-1 min-h-0 px-5 py-4">
         <div className="mx-auto max-w-5xl space-y-4">
           <div className="flex items-center justify-between">
-            <div className="text-xs text-secondary">{lots.length} 个批次</div>
-            <button
-              onClick={() => setEditing(emptyDraft())}
-              className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-accent/30 bg-accent/10 px-3 text-xs font-medium text-accent transition-colors hover:bg-accent/15 cursor-pointer"
-            >
-              <Plus className="h-3.5 w-3.5" />新增批次
-            </button>
+            <div className="text-xs text-secondary">{lots.length} 个批次{syncMsg ? ` · ${syncMsg}` : ''}</div>
+            <div className="flex items-center gap-2">
+              {paperAccounts.length > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={syncAccount}
+                    onChange={e => setSyncAccount(e.target.value)}
+                    className="h-9 rounded-btn border border-border bg-surface px-2 text-xs text-secondary cursor-pointer"
+                  >
+                    <option value="">默认账户</option>
+                    {paperAccounts.map(a => (
+                      <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => syncPaper.mutate(syncAccount)}
+                    disabled={syncPaper.isPending}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-border bg-elevated/50 px-3 text-xs font-medium text-secondary transition-colors hover:bg-elevated disabled:opacity-50 cursor-pointer"
+                  >
+                    <ArrowDownUp className="h-3.5 w-3.5" />{syncPaper.isPending ? '同步中…' : '从模拟盘同步'}
+                  </button>
+                </div>
+              )}
+              <button
+                onClick={() => setEditing(emptyDraft())}
+                className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-accent/30 bg-accent/10 px-3 text-xs font-medium text-accent transition-colors hover:bg-accent/15 cursor-pointer"
+              >
+                <Plus className="h-3.5 w-3.5" />新增批次
+              </button>
+            </div>
           </div>
 
           {lotsQuery.isLoading ? (

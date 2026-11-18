@@ -129,3 +129,30 @@ def delete_lot(lot_id: str, request: Request):
     if deleted or deleted_p or deleted_d:
         _reload_engine(request)
     return {"ok": True}
+
+
+class PaperSyncRequest(BaseModel):
+    account: str = "default"
+
+
+@router.post("/sync-paper")
+def sync_from_paper(body: PaperSyncRequest, request: Request):
+    """模拟盘持仓 → 批次单向同步: 清仓移除批次, 持仓/成本变化重写。
+
+    只管理 pp_* 命名空间 (同步生成的批次); 用户手动登记的批次与用户在
+    同步批次上补填的止盈止损/到期参数不受影响。
+    """
+    from app.strategy import paper
+
+    data_dir = _data_dir(request)
+    account = (body.account or "").strip() or paper.DEFAULT_ACCOUNT_ID
+    acc = paper.get_account(data_dir, account)
+    if acc is None:
+        raise HTTPException(status_code=404, detail=f"模拟盘账户不存在: {account}")
+
+    with _write_lock:
+        positions = paper.rebuild_positions(data_dir, account)
+        result = lots_domain.sync_paper_positions(data_dir, account, positions)
+    if result["written"] or result["deleted"]:
+        _reload_engine(request)
+    return {"ok": True, "account": account, **result}

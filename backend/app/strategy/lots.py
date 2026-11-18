@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
@@ -155,3 +156,89 @@ def lot_to_rules(lot: dict) -> tuple[dict | None, dict | None]:
             "lot_id": lot_id,
         }
     return price_rule, date_rule
+
+
+# ── 模拟盘持仓 → 批次 同步 (单向: paper → lots) ─────────
+# 模拟盘持仓 (paper.py positions.json) 与手动登记批次 (lots) 是两个独立
+# 账本: 前者是策略自动交易的持仓, 后者是提醒规则的来源。同步把模拟盘
+# 当前持仓镜像成批次, 让止盈止损/到期提醒与实际持仓保持一致。
+
+# 同步批次的稳定 id: lot_pp_{account}_{code} — lot_ 前缀匹配 _LOT_STORE 的
+# glob (lot_*.json); account 为账户 id 的小写化, code 为 symbol 去交易所后缀
+# (000042.SZ → 000042)。连同派生规则后缀 _p/_d 不得超过 40 字符。
+def paper_lot_id(account_id: str, symbol: str) -> str:
+    code = symbol.split(".")[0]
+    acc = re.sub(r"[^a-z0-9_]", "", account_id.lower())
+    lot_id = f"lot_pp_{acc}_{code}"
+    if not _ID.match(lot_id) or len(lot_id) > _MAX_ID_LEN:
+        raise ValueError(f"账户 {account_id!r} + 标的 {symbol!r} 生成的批次 id 超长: {lot_id!r}")
+    return lot_id
+
+
+def diff_paper_positions(
+    data_dir: Path, account_id: str, positions: dict[str, dict]
+) -> tuple[list[dict], list[str], list[dict]]:
+    """对比模拟盘持仓与现有同步批次, 返回 (需写入的批次, 需删除的批次 id, 不变批次)。
+
+    只管理 lot_pp_* 命名空间的批次 (模拟盘同步): 用户手动登记的批次绝不触碰;
+    账户清仓后对应同步批次自动移除。数量/成本变化重写批次。
+    """
+    existing = {l["id"]: l for l in load_all(data_dir) if l["id"].startswith("lot_pp_")}
+    wanted: dict[str, dict] = {}
+    for symbol, pos in positions.items():
+        qty = int(pos.get("qty", 0) or 0)
+        cost = float(pos.get("avg_cost", 0) or 0)
+        if qty <= 0 or cost <= 0:
+            continue
+        # 最早批次买入日 (多批合并持仓取最早, 提醒口径与持有天数一致)
+        dates = [str(l.get("date") or "")[:10] for l in pos.get("lots", []) if l.get("qty", 0) > 0]
+        buy_date = min(dates) if dates else None
+        lot_id = paper_lot_id(account_id, symbol)
+        wanted[lot_id] = {
+            "id": lot_id,
+            "symbol": symbol,
+            "qty": qty,
+            "cost_price": cost,
+            "buy_date": buy_date,
+            # 止盈止损默认 0: 模拟盘持仓的提醒点由用户按需在批次页补填,
+            # 同步只保证「持仓在批次页可见且随持仓增删」, 不替用户做止盈止损决策。
+            "target_pct": 0,
+            "stop_pct": 0,
+            "remind_date": None,
+            "lead_days": 1,
+            "note": f"模拟盘 {account_id} 同步",
+        }
+    # 保留用户在同步批次上补填的止盈止损/到期设置 (同步覆盖数量/成本/日期,
+    # 不抹掉提醒参数)
+    for lot_id, lot in wanted.items():
+        old = existing.get(lot_id)
+        if old:
+            for key in ("target_pct", "stop_pct", "remind_date", "lead_days"):
+                if old.get(key):
+                    lot[key] = old[key]
+            if old.get("created_at"):
+                lot["created_at"] = old["created_at"]
+    unchanged = [existing[i] for i in existing if i in wanted and existing[i] == wanted.get(i)]
+    to_write = [wanted[i] for i in wanted if i not in existing or existing[i] != wanted[i]]
+    to_delete = [i for i in existing if i not in wanted]
+    return to_write, to_delete, unchanged
+
+
+def sync_paper_positions(
+    data_dir: Path, account_id: str, positions: dict[str, dict]
+) -> dict:
+    """把模拟盘持仓镜像为 lot_pp_* 批次 (纯数据层: 写批次文件, 不建派生规则)。
+
+    派生规则 (止盈止损/到期) 与引擎重载由 API 层 sync_lot 统一处理 —
+    同步批次 target/stop 默认 0, 无派生价格规则; 用户补填后由批次页
+    正常编辑链路生成规则。
+    """
+    to_write, to_delete, unchanged = diff_paper_positions(data_dir, account_id, positions)
+    for lot in to_write:
+        save_one(data_dir, normalize_lot(lot))
+    for lot_id in to_delete:
+        delete_one(data_dir, lot_id)
+        # 同步批次默认无派生规则 (target/stop=0), 但用户补填过再清仓的情形要级联删
+        monitor_rules.delete_one(data_dir, f"{lot_id}_p")
+        monitor_rules.delete_one(data_dir, f"{lot_id}_d")
+    return {"written": len(to_write), "deleted": len(to_delete), "unchanged": len(unchanged)}

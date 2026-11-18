@@ -4989,6 +4989,13 @@ export const api = {
   lotDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/lots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  /** 模拟盘持仓 → 批次单向同步 (只管理 pp_* 同步批次, 不碰手动登记) */
+  lotsSyncPaper: (account?: string) =>
+    request<{ ok: boolean; account: string; written: number; deleted: number; unchanged: number }>('/api/lots/sync-paper', {
+      method: 'POST',
+      body: JSON.stringify({ account: account ?? 'default' }),
+    }),
+
   // ===== Paper (虚拟账户/模拟盘: 虚拟资金 + 真实行情价格模拟撮合, 多账户) =====
   paperAccounts: () =>
     request<{ accounts: PaperAccountSummary[] }>('/api/paper/accounts'),

@@ -53,7 +53,19 @@ cd frontend; npx pnpm dev
 | 拉取数据 0 行 | TickFlow 免费服务器要求带 `.SH/.SZ` 后缀；首次拉取会自动建 instruments 维表后再补全，耐心等管线跑完 |
 | `dev.ps1` 报 "handle is invalid" | 在无控制台的后台环境跑导致；用上面"后台常驻"方式分起前后端 |
 | uv 装完找不到命令 | 装到 `~/.local/bin`，新终端或手动加 PATH |
-| 想要实时行情/分钟K/财务四表 | 需 `TICKFLOW_API_KEY`（tickflow.org 注册）或 fuyao Key，填入 `.env` |
+| 实时行情/分钟K/财务/板块为空 | 确认免费数据源 aksource 在跑：`curl http://127.0.0.1:3021/boards?kind=concept`；没起就 `cd aksource && ../backend/.venv/bin/python server.py`（见 `aksource/README.md`）。**无需任何 API Key** |
+
+## 免费数据源 aksource（板块/财务/实时/分钟，零 Key）
+
+`data/data_sources/aksource.yaml` 已内置（随 git clone 附带），指向本机 `127.0.0.1:3021` 的免费聚合服务（新浪/腾讯/东财公开接口）。启动方式：
+
+```bash
+cd aksource
+../backend/.venv/bin/python server.py        # Linux/macOS
+# Windows: ..\backend\.venv\Scripts\python.exe server.py
+```
+
+`quick-start.ps1` / `quick-start.sh` / `start-tsp.ps1` 均会自动带起。能力一览见 `aksource/README.md`。
 
 ## 数据落盘位置
 
@@ -64,6 +76,8 @@ data/kline_daily/           全 A 股日K（约 29MB/年）
 data/kline_daily_enriched/  68 列指标富集数据（约 51MB/年）
 data/kline_index_daily/     指数日K（599 个指数）
 data/instruments/           股票维表
+data/data_sources/          自定义数据源配置（aksource.yaml，随仓库分发）
 ```
 
-升级：`git pull` 后重启即可，`data/` 不受影响（已在 .gitignore 中）。
+升级：`git pull` 后重启即可，`data/` 运行时数据不受影响（已在 .gitignore 中；
+`data/data_sources/` 是配置而非数据，随仓库走）。
