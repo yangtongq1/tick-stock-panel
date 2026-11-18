@@ -40,20 +40,38 @@ backend/app/static/
 *.swo
 .DS_Store
 
-# ===== Project data (Parquet/DuckDB) =====
+# ===== Project data =====
 backend/data/**
 !backend/data/.gitkeep
+# data/ 策略 (2026-11-18): 行情核心数据随 git 分发 —— clone 即得与作者机器
+# 一模一样的行情, 各机器此后每日自动增量 (aksource 免费源), 历史分区按日
+# 划分只追加不覆盖, 多机不会冲突。
+# 入库: 日K/富集/指数/分钟 K, 财务四表, 除权因子, instruments 维表, 数据源配置。
+# 不入库: 用户私有 (user_data 含 secrets/API Key/自选/批次), 模拟盘账户 (paper),
+#        运行时状态 (logs/job_store/backtest_runs/ai_cache/告警流/回测结果),
+#        ext_data 板块快照 (每日拉取即得, 免维护 git 体积)。
 data/**
 !data/.gitkeep
-# data/ 下所有内容(含 ext_data 概念/行业)均不入库:
-#   - 用户运行时数据 (K线/财务/自选/回测等) 本就不该进 git
-#   - 概念/行业改为「首次启动自动从远程接口拉取」(见 app/services/ext_presets.py)
-#     作者更新数据只需改接口 JSON, 用户下次拉取自动同步, 无需发版、无需碰 git。
-# 这样 git pull 物理上无法影响用户本地 data, 杜绝「更新后数据丢失」。
-# 例外: data_sources/*.yaml 是自定义数据源「配置」而非数据 (指向本机 aksource
-# 免费源), git clone 后开箱即用的前提 — 必须入库。
 !data/data_sources/
 !data/data_sources/**
+!data/kline_daily/
+!data/kline_daily/**
+!data/kline_daily_enriched/
+!data/kline_daily_enriched/**
+!data/kline_index_daily/
+!data/kline_index_daily/**
+!data/kline_minute/
+!data/kline_minute/**
+!data/financials/
+!data/financials/**
+!data/adj_factor/
+!data/adj_factor/**
+!data/instruments/
+!data/instruments/**
+!data/instruments_etf/
+!data/instruments_etf/**
+!data/instruments_index/
+!data/instruments_index/**
 
 # ===== Secrets =====
 .env
