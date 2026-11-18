@@ -1,68 +1,117 @@
-# tick-stock-panel 一键部署脚本 (Windows PowerShell)
-# 用法: .\quick-start.ps1
+﻿# tick-stock-panel 一键部署脚本 (Windows PowerShell)
+# 目标: git clone 后只需这一条命令 → 浏览器打开 http://localhost:3018 即是完整系统
+# (行情数据随仓库分发, 无需拉取; 前端构建一次, 之后不再需要 Node 常驻)
+#
+# 用法:  .\quick-start.ps1          首次/日常启动 (幂等: 已装依赖/已构建自动跳过)
+#        .\quick-start.ps1 -Rebuild 强制重建前端
+param([switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$Root = (Get-Location).Path
 
-Write-Host "== 1/6 依赖检查 ==" -ForegroundColor Cyan
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) { throw "缺少 Python 3.11+" }
-if (-not (Get-Command node -ErrorAction SilentlyContinue))   { throw "缺少 Node 20+" }
+function Test-Http($Url) {
+  # 只要有 HTTP 响应 (含 4xx/5xx) 即认为服务存活——不能因上游数据源抖动误判
+  # "不在运行" 而重复起服务 (曾因 /boards 接口 500 误判重复拉起)
+  try { Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3 | Out-Null; $true }
+  catch { $_.Exception.Response -ne $null }
+}
 
-# uv
+# PS 5.1 下原生命令 stderr 输出会被 $ErrorActionPreference=Stop 拦成错误
+# (uv/pnpm 常把进度写到 stderr)。经 cmd /c 包一层后 stderr 不会触发 PowerShell 异常,
+# 由 $LASTEXITCODE 判断成败。
+function Invoke-Native($File, $ArgList) {
+  $args = ($ArgList | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+  cmd /c "`"$File`" $args 2>&1" | ForEach-Object { "$_" }
+  if ($LASTEXITCODE -ne 0) { throw "命令失败 (exit $LASTEXITCODE): $File $args" }
+}
+
+Write-Host "== 1/5 依赖检查 ==" -ForegroundColor Cyan
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) { throw "缺少 Python 3.11+ (winget install Python.Python.3.12)" }
+if (-not (Get-Command node -ErrorAction SilentlyContinue))   { throw "缺少 Node 20+ (winget install OpenJS.NodeJS.LTS)" }
+
+# uv (Python 依赖管理)
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host "安装 uv..."
-  winget install --id=astral-sh.uv --accept-source-agreements --accept-package-agreements --silent
+  Invoke-Native winget @('install', '--id=astral-sh.uv', '--accept-source-agreements', '--accept-package-agreements', '--silent')
   $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
+  if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { throw "uv 安装后不可用, 请新开终端重跑" }
 }
 
-# pnpm
+# pnpm (仅构建前端时需要, 不常驻)
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
   Write-Host "安装 pnpm..."
-  npm i -g pnpm
+  Invoke-Native npm @('i', '-g', 'pnpm')
 }
 
-Write-Host "== 2/6 配置 ==" -ForegroundColor Cyan
+Write-Host "== 2/5 配置 ==" -ForegroundColor Cyan
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
-Write-Host "== 3/6 后端依赖 ==" -ForegroundColor Cyan
+Write-Host "== 3/5 后端依赖 ==" -ForegroundColor Cyan
 Push-Location backend
-uv sync
+Invoke-Native uv @('sync')
 Pop-Location
 
-Write-Host "== 4/6 前端依赖 ==" -ForegroundColor Cyan
-Push-Location frontend
-pnpm install
-Pop-Location
+Write-Host "== 4/5 前端构建 (一次, 之后不再需要 Node) ==" -ForegroundColor Cyan
+$needBuild = $Rebuild -or -not (Test-Path "frontend\dist\index.html")
+if ($needBuild) {
+  Push-Location frontend
+  Invoke-Native pnpm @('install', '--silent')
+  Invoke-Native pnpm @('build')
+  Pop-Location
+} else {
+  Write-Host "已构建, 跳过 (强制重建: .\quick-start.ps1 -Rebuild)"
+}
 
-# ---- 5/6 免费数据源 aksource (端口 3021) ----
-# 板块/财务/除权因子/全市场实时快照的免费聚合源 (新浪/腾讯/东财),
-# TSP 侧 data/data_sources/aksource.yaml 指向它; 复用 backend venv。
-Write-Host "== 5/6 启动免费数据源 (aksource, 端口 3021) ==" -ForegroundColor Cyan
-$logDir = ".\data\logs"
+# ---- 5/5 三件套: aksource 3021 + 后端 3018 (直接伺服前端) ----
+$logDir = "$Root\data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-$aksRunning = Get-NetTCPConnection -State Listen -LocalPort 3021 -ErrorAction SilentlyContinue
-if ($aksRunning) {
+
+# 免费数据源 aksource (板块/财务/除权/实时/分钟; 复用 backend venv)
+# cmd /c start 派生分离进程: 不随终端退出, 且避开 Start-Process 在大小写重复
+# proxy 环境变量下报 "已添加项" 字典键冲突的问题
+if (Test-Http "http://127.0.0.1:3021/") {
   Write-Host "[tsp] 数据源 3021 已在运行"
 } else {
   Write-Host "[tsp] 启动免费数据源 3021 ..."
-  Start-Process -WindowStyle Hidden -FilePath ".\backend\.venv\Scripts\python.exe" `
-    -ArgumentList 'server.py' `
-    -WorkingDirectory ".\aksource" `
-    -RedirectStandardOutput "$logDir\aksource.log" -RedirectStandardError "$logDir\aksource.err.log"
+  $py = "$Root\backend\.venv\Scripts\python.exe"
+  Push-Location "$Root\aksource"
+  cmd /c "start /min `"aksource`" cmd /c `"`"$py`" server.py >> `"$logDir\aksource.log`" 2>&1`"" | Out-Null
+  Pop-Location
   Start-Sleep -Seconds 2
 }
 
-Write-Host "== 6/6 启动 ==" -ForegroundColor Cyan
-Write-Host "交互模式: .\dev.ps1"
-Write-Host "后台常驻: .\start-tsp.ps1"
+# 后端 3018: host 0.0.0.0 局域网可访问 (QUANT TERMINAL 等对接);
+# 已挂载 frontend/dist → 一个地址同时出页面与 API
+if (Test-Http "http://127.0.0.1:3018/api/capabilities") {
+  Write-Host "[tsp] 后端 3018 已在运行"
+} else {
+  Write-Host "[tsp] 启动后端 3018 ..."
+  Start-Process -WindowStyle Hidden -FilePath "$Root\backend\.venv\Scripts\python.exe" `
+    -ArgumentList '-m','uvicorn','app.main:app','--env-file',"$Root\.env",'--host','0.0.0.0','--port','3018' `
+    -WorkingDirectory "$Root\backend" `
+    -RedirectStandardOutput "$logDir\backend.log" -RedirectStandardError "$logDir\backend.err.log"
+}
+
+# 等后端就绪 (首次启动要做数据预热, 最多 90s)
+Write-Host "[tsp] 等待后端就绪" -NoNewline
+$ready = $false
+foreach ($i in 1..45) {
+  if (Test-Http "http://127.0.0.1:3018/api/capabilities") { $ready = $true; break }
+  Write-Host "." -NoNewline
+  Start-Sleep -Seconds 2
+}
+Write-Host ""
+if (-not $ready) { Write-Warning "后端 90s 未就绪, 请查看 data\logs\backend.err.log" }
+
 Write-Host ""
 Write-Host "======================================" -ForegroundColor Green
-Write-Host " 后端  http://localhost:3018"
-Write-Host " 前端  http://localhost:3011"
-Write-Host " 数据源 http://localhost:3021  (免费: 实时/分钟/板块/财务)"
-Write-Host " 首次拉数据: curl -X POST http://127.0.0.1:3018/api/pipeline/run"
-Write-Host " (约 6 分钟, 5892 只 A 股 x 近 1 年日K, 免费)"
+Write-Host " 系统已就绪 → http://localhost:3018"
+Write-Host " (页面+API 同一地址; 局域网用本机 IP:3018)"
+Write-Host " 数据源 http://localhost:3021 (免费: 实时/分钟/板块/财务)"
+Write-Host " 行情数据随仓库自带, 开箱即用"
+Write-Host " 停止: 任务管理器结束 python (uvicorn/server.py) 即可"
 Write-Host "======================================" -ForegroundColor Green
 
-# 默认直接进入交互启动
-& .\dev.ps1
+# 打开浏览器
+Start-Process "http://localhost:3018"
