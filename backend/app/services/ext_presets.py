@@ -40,16 +40,11 @@ from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-# fuyao 同花顺指数接口 (鉴权 X-api-key, 信封 {code, message, data:{item:[...]}})
+# 历代出厂源指纹 (仅 _RETIRED_FACTORY_PULLS 引用): fuyao 同花顺指数接口,
+# 鉴权 X-api-key, 信封 {code, message, data:{item:[...]}}。2026-11-18 起出厂
+# 配方改走本地 aksource 聚合端点 (免鉴权), fuyao 配方仅留作旧库迁移指纹。
 _FUYAO_BASE = "https://fuyao.aicubes.cn"
 _FUYAO_CATALOG_PATH = "/api/a-share-index/catalog/ths-index-list"
-_FUYAO_CONSTITUENTS_PATH = "/api/a-share-index/constituents/ths-stock-list"
-# 成分股逐板块拉取: 全量 710 次调用, 8 并发 + 单板块失败重试 1 次 (实测无 429)
-_FUYAO_CONCURRENCY = 8
-_FUYAO_TIMEOUT_S = 20.0
-_FUYAO_BOARD_RETRIES = 1
-# 复用 fuyao 行情插件的凭据 (secrets.json: fuyao_api_key / 环境变量 FUYAO_API_KEY)
-_FUYAO_KEY_REF = "fuyao_api_key"
 
 _PRESET_IDS = ("ext_gn_ths", "ext_hy_ths")
 
@@ -61,16 +56,20 @@ _SEED_MARKER = ".builtin_presets_seeded"
 # 预设定义: 字段结构 + 完整拉取配方
 # ---------------------------------------------------------------------------
 
-def _fuyao_auth() -> dict:
-    """fuyao 鉴权: X-api-key 头, 凭据复用行情插件的 fuyao_api_key。"""
-    return {"type": "header", "header": "X-api-key", "key_ref": _FUYAO_KEY_REF}
+def _aksource_boards_url(kind: str) -> str:
+    """本地 aksource 板块聚合端点 (东方财富源, 免鉴权)。"""
+    return f"http://127.0.0.1:3021/boards?kind={kind}"
+
+
+_AKSOURCE_DESC = "板块成分 (东方财富 push2, 经本地 aksource 聚合; 拉取配方见「拉取」页)"
+_AKSOURCE_TIMEOUT_S = 180.0  # 首轮全量聚合 (1050 板块) 20-60s, 留足余量
 
 
 def _concept_preset() -> ExtConfig:
     """扩展概念 (ext_gn_ths)。
 
-    两级拉取: 板块目录 (tag=cn_concept) → 逐板块成分股, 反转为
-    「股票 → 所属概念」, 多个概念以分号拼接。
+    本地 aksource 聚合端点: 一次请求返回「股票 → 所属概念清单」全量
+    (东财 554 个概念板块逐板块拉成分后反转聚合, 20s 内完成)。
     输出 schema: 股票代码 / 股票简称 / 所属概念 / symbol / code
     """
     return ExtConfig(
@@ -84,32 +83,18 @@ def _concept_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属概念", "string", "所属概念"),
         ],
-        description="同花顺概念分类 (fuyao 同花顺指数接口; 拉取配方见「拉取」页, 可照抄接自有源)",
+        description=_AKSOURCE_DESC,
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
-            url=f"{_FUYAO_BASE}{_FUYAO_CATALOG_PATH}?tag=cn_concept",
+            url=_aksource_boards_url("concept"),
             method="GET",
-            response_path="data.item",
-            auth=_fuyao_auth(),
-            timeout_seconds=int(_FUYAO_TIMEOUT_S),
+            response_path="data",
+            field_map={"board_list": "所属概念"},
+            auth={"type": "none"},
+            timeout_seconds=int(_AKSOURCE_TIMEOUT_S),
             schedule_minutes=1440,
             enabled=True,
-            fanout={
-                "url": f"{_FUYAO_BASE}{_FUYAO_CONSTITUENTS_PATH}",
-                "param": "thscode",
-                "id_field": "thscode",
-                "label_field": "name",
-                "items_path": "data.item",
-                "member_id_field": "thscode",
-                "member_label_field": "name",
-                "symbol_col": "股票代码",
-                "name_col": "股票简称",
-                "value_col": "所属概念",
-                "separator": ";",
-                "concurrency": _FUYAO_CONCURRENCY,
-                "retries": _FUYAO_BOARD_RETRIES,
-            },
         ),
     )
 
@@ -117,7 +102,8 @@ def _concept_preset() -> ExtConfig:
 def _industry_preset() -> ExtConfig:
     """扩展行业 (ext_hy_ths)。
 
-    fuyao 为扁平板块清单, 无一/二/三级层级路径, 单级粒度。
+    本地 aksource 聚合端点。东财行业板块天然带层级 (小家电;家用电器),
+    ";" 分隔保留全部层级标签。
     输出 schema: 股票代码 / 股票简称 / 所属同花顺行业 / symbol / code
     """
     return ExtConfig(
@@ -131,32 +117,18 @@ def _industry_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属同花顺行业", "string", "所属同花顺行业"),
         ],
-        description="同花顺行业分类 (fuyao 同花顺指数接口, 扁平板块无层级; 拉取配方见「拉取」页)",
+        description=_AKSOURCE_DESC,
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
-            url=f"{_FUYAO_BASE}{_FUYAO_CATALOG_PATH}?tag=industry",
+            url=_aksource_boards_url("industry"),
             method="GET",
-            response_path="data.item",
-            auth=_fuyao_auth(),
-            timeout_seconds=int(_FUYAO_TIMEOUT_S),
+            response_path="data",
+            field_map={"board_list": "所属同花顺行业"},
+            auth={"type": "none"},
+            timeout_seconds=int(_AKSOURCE_TIMEOUT_S),
             schedule_minutes=1440,
             enabled=True,
-            fanout={
-                "url": f"{_FUYAO_BASE}{_FUYAO_CONSTITUENTS_PATH}",
-                "param": "thscode",
-                "id_field": "thscode",
-                "label_field": "name",
-                "items_path": "data.item",
-                "member_id_field": "thscode",
-                "member_label_field": "name",
-                "symbol_col": "股票代码",
-                "name_col": "股票简称",
-                "value_col": "所属同花顺行业",
-                "separator": "-",
-                "concurrency": _FUYAO_CONCURRENCY,
-                "retries": _FUYAO_BOARD_RETRIES,
-            },
         ),
     )
 
@@ -173,13 +145,14 @@ def get_preset(config_id: str) -> ExtConfig | None:
     return None
 
 
-# 历代出厂 pull 配方指纹 — 仅比对 url + fanout 是否存在, 命中即视为未改过的出厂值。
-# 换源/改配方后, 老用户的出厂配置需要整体替换为新配方; 用户自己填过 URL 的不动。
+# 历代出厂 pull 配方指纹 — 仅比对 url。命中即视为未改过的出厂值 (无论有无
+# fanout: fuyao 两级形态与早期目录标记同源), 启动时整体替换为当前配方;
+# 用户自己填过 URL 的不动。
 _RETIRED_FACTORY_PULLS: dict[str, tuple[dict, ...]] = {
     "ext_gn_ths": (
         # 换源前的自维护种子源
         {"url": "https://shy313.com/api/plugins/market_flow/exports/ths-concepts"},
-        # 过渡期的 fuyao 目录标记 (无 fanout, 拉不到成分股)
+        # fuyao 目录/两级形态 (依赖付费 fuyao_api_key, 未配时恒失败)
         {"url": f"{_FUYAO_BASE}{_FUYAO_CATALOG_PATH}?tag=cn_concept"},
     ),
     "ext_hy_ths": (
@@ -197,19 +170,23 @@ _FACTORY_DESC_PREFIXES = (
 def _is_retired_factory_pull(config_id: str, pull: PullConfig | None) -> bool:
     """现有 pull 是否为历代出厂值 (不含当前配方), 需要补齐/替换为当前配方。
 
-    True 的三种情形:
+    True 的情形:
       - pull 为 None / 空 URL: 出厂空壳 (#199 之后、本次改动之前的形态)
-      - URL 命中历代出厂源, 且未带 fanout (换源前的种子源 / 只有目录的过渡配方)
-    用户自定义过 URL 或已带 fanout 的配置一律 False (绝不覆盖)。
+      - URL 命中历代出厂源: 无 fanout (种子源/目录标记) 或 fuyao fanout 形态
+        (依赖付费 Key, 未配 Key 时恒失败, 与空壳等价) 均视为出厂值
+    用户自定义过 URL 的配置一律 False (绝不覆盖)。
     """
     if pull is None:
         return True
     url = (pull.url or "").strip()
     if not url:
         return True   # 空 URL 的空壳配置: 由出厂空壳演进而来, 需补齐
-    if pull.fanout:
-        return False  # 已带两级配方 (当前形态或用户自建), 不碰
-    return any(url == retired["url"] for retired in _RETIRED_FACTORY_PULLS.get(config_id, ()))
+    urls = {retired["url"] for retired in _RETIRED_FACTORY_PULLS.get(config_id, ())}
+    if url not in urls:
+        return False  # 用户自定义 URL, 绝不覆盖
+    # 同一 url 的出厂形态要么带 fanout (fuyao 两级), 要么不带 (种子源/目录标记):
+    # 只要是出厂 url 且非当前配方, 一律视为出厂值待迁移。
+    return True
 
 
 async def ensure_builtin_presets(data_dir: Path) -> None:

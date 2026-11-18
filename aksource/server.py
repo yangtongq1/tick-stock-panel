@@ -789,6 +789,161 @@ def financial(req: BatchReq) -> dict:
     return {"data": rows}
 
 
+# ---------------- 板块成分 (东方财富 push2: 概念 t:3 / 行业 t:2) ----------------
+# 东财板块两级形态: 目录 (m:90+t:N) + 成分股 (fs=b:BKxxxx)。全量聚合在
+# aksource 侧完成 (1050 个板块 × 逐板块分页拉取, 一次约 1100+ 请求, 放
+# TSP 侧拉取配方里做会顶爆单次拉取超时), 聚合后反转为「股票 → 板块清单」
+# 与 TSP 扩展表行结构对齐。
+#
+# 性能要点: 逐次新建连接请求东财 (DNS 慢) 单次 13s+, 复用 Client 连接池后
+# 0.02s/请求 —— 全量刷新专用长连 Client, 用完即关。响应体为 UTF-8 JSON
+# (不走 http_get: 它按 GBK 解码, 会把板块名变乱码)。
+EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
+
+# 板块缓存: 10 分钟 TTL (全量成员拉取一轮 ~1100 请求, TSP 侧 1440 分钟
+# 日程一次足够新鲜)
+_BOARDS_TTL = 600.0
+# 按 kind (concept/industry) 分别缓存: {kind: {"rows": [...], "last_ok": t}}
+_BOARDS_CACHE: dict[str, dict] = {}
+_BOARDS_LOCK = threading.Lock()
+
+
+def _em_client() -> Any:
+    """东财专用长连 Client (直连 + 连接池复用)。"""
+    import httpx
+
+    return httpx.Client(timeout=10.0, trust_env=False, headers=HEADERS)
+
+
+def _em_get_json(client: Any, url: str, retries: int = 3) -> dict | None:
+    """东财 clist 请求。偶发空响应 (~1/4) 与瞬时失败靠重试覆盖。"""
+    for i in range(retries):
+        try:
+            r = client.get(url)
+            if r.status_code == 200 and r.content.strip():
+                return r.json()
+        except Exception:  # noqa: BLE001
+            pass
+        if i < retries - 1:
+            time.sleep(0.4)
+    return None
+
+
+def _em_board_catalog(client: Any, kind: str) -> list[dict]:
+    """板块目录: kind=concept (m:90+t:3) / industry (m:90+t:2)。
+
+    返回 [{"bk": "BK1036", "name": "半导体", "members": [...]}], 分页 pz=100。
+    """
+    t = "3" if kind == "concept" else "2"
+    out: list[dict] = []
+    pn = 1
+    while pn <= 20:
+        url = (
+            f"{EM_CLIST}?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f12"
+            f"&fs=m:90+t:{t}&fields=f12,f14"
+        )
+        d = _em_get_json(client, url)
+        diff = ((d or {}).get("data") or {}).get("diff") or []
+        for it in diff:
+            bk, name = str(it.get("f12") or "").strip(), str(it.get("f14") or "").strip()
+            if bk.startswith("BK") and name:
+                out.append({"bk": bk, "name": name, "members": []})
+        if len(diff) < 100:
+            break
+        pn += 1
+    return out
+
+
+def _em_board_members(client: Any, bk: str) -> list[dict]:
+    """单板块成分股: [{"code": "600519", "name": "贵州茅台"}, ...], 分页 pz=100。"""
+    out: list[dict] = []
+    pn = 1
+    while pn <= 60:
+        url = (
+            f"{EM_CLIST}?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f12"
+            f"&fs=b:{bk}&fields=f12,f14"
+        )
+        d = _em_get_json(client, url)
+        diff = ((d or {}).get("data") or {}).get("diff") or []
+        for it in diff:
+            code, name = str(it.get("f12") or "").strip(), str(it.get("f14") or "").strip()
+            if code and name:
+                out.append({"code": code, "name": name})
+        if len(diff) < 100:
+            break
+        pn += 1
+    return out
+
+
+def _refresh_boards(kind: str) -> list[dict]:
+    """全量刷新一类板块: 目录 + 逐板块成分 (8 并发), 返回反转行。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    client = _em_client()
+    try:
+        catalog = _em_board_catalog(client, kind)
+        if not catalog:
+            raise RuntimeError("板块目录拉取失败 (东方财富接口不可达)")
+
+        def fetch(entry: dict) -> None:
+            entry["members"] = _em_board_members(client, entry["bk"])
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(fetch, catalog))
+    finally:
+        client.close()
+
+    # 反转: 股票 → 板块名清单 (跟随目录顺序, 拼接结果稳定)
+    agg: dict[str, dict] = {}
+    for e in catalog:
+        for m in e["members"]:
+            row = agg.get(m["code"])
+            if row is None:
+                row = {"股票代码": m["code"], "股票简称": m["name"], "_labels": []}
+                agg[m["code"]] = row
+            if e["name"] not in row["_labels"]:
+                row["_labels"].append(e["name"])
+
+    rows = [
+        {
+            "股票代码": r["股票代码"],
+            "股票简称": r["股票简称"],
+            "board_list": ";".join(r["_labels"]),
+        }
+        for r in agg.values()
+    ]
+    ok = sum(1 for e in catalog if e["members"])
+    log.info(
+        "boards %s refresh: %d boards (%d ok), %d stocks",
+        kind, len(catalog), ok, len(rows),
+    )
+    return rows
+
+
+@app.get("/boards")
+def boards(kind: str = "concept") -> dict:
+    """板块成分聚合: kind=concept (概念) / industry (行业)。
+
+    输出行: {股票代码, 股票简称, board_list} — board_list 为该股归属的
+    全部板块名, ";" 分隔。TSP 侧 field_map 把 board_list 映射到目标列
+    (概念表 → 所属概念 / 行业表 → 所属同花顺行业)。缓存 10 分钟。
+    """
+    kind = (kind or "concept").strip().lower()
+    if kind not in ("concept", "industry"):
+        return {"data": [], "error": "kind 必须为 concept 或 industry"}
+
+    with _BOARDS_LOCK:
+        st = _BOARDS_CACHE.get(kind)
+        if st and st["rows"] and time.time() - st["last_ok"] < _BOARDS_TTL:
+            return {"data": st["rows"]}
+
+    rows = _refresh_boards(kind)
+
+    with _BOARDS_LOCK:
+        _BOARDS_CACHE[kind] = {"rows": rows, "last_ok": time.time()}
+    return {"data": rows}
+
+
 @app.on_event("startup")
 def _start_full_rt_refresher() -> None:
     """FastAPI startup: 拉起全市场行情后台刷新线程 (90s 一轮)"""

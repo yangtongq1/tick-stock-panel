@@ -1,12 +1,16 @@
 """内置概念/行业 preset 启动契约。
 
-出厂即带【完整可用的拉取配方】(URL / 鉴权 / 两级请求 fanout), 不是空壳 —
+出厂即带【完整可用的拉取配方】(URL / 免鉴权 / 字段映射), 不是空壳 —
 「数据」页展开表 → 拉取 就能看到一份真实可跑的配方, 供接入自有源照抄。
+
+2026-11-18 起出厂配方走本地 aksource 板块聚合端点 (东方财富源, 免鉴权,
+单请求返回「股票 → 板块清单」全量), 不再使用 fuyao 两级 fanout; fuyao
+配方仅留作历代出厂指纹, 供旧库启动时自动迁移。
 
 ensure_builtin_presets 的契约:
   - 只创建/补齐 config.json, 不拉取数据 (数据由调度器或用户手动触发)
   - 创建仅发生在首次安装 (播种标记缺失); 已播种后删除的内置表不复活
-  - 空壳 / 历代出厂配方 → 补齐/替换为当前配方 (不受播种标记限制)
+  - 空壳 / 历代出厂配方 (含 fuyao fanout 形态) → 替换为当前配方
   - 用户自定义过 pull (URL 非出厂值) 或 description → 一律不碰
   - 失败只记 warning, 不阻断启动
 """
@@ -27,27 +31,28 @@ _PRESET_IDS = ("ext_gn_ths", "ext_hy_ths")
 
 
 def test_builtin_presets_ship_with_complete_pull() -> None:
-    """出厂 preset 自带完整拉取配方: URL / 鉴权 / 两级请求一应俱全。"""
+    """出厂 preset 自带完整拉取配方: aksource 端点 / 免鉴权 / 字段映射。"""
     for preset in (_concept_preset(), _industry_preset()):
         pull = preset.pull
         assert pull is not None, f"{preset.id} 出厂未带拉取配方"
-        assert pull.url.startswith("https://"), f"{preset.id} 缺少第一级 URL"
-        assert pull.response_path, f"{preset.id} 缺少响应路径"
-        assert pull.auth and pull.auth.get("type") == "header", f"{preset.id} 缺少鉴权配置"
-        # 凭据复用 fuyao 行情插件, 用户只需在一处填 Key
-        assert pull.auth.get("key_ref") == "fuyao_api_key", f"{preset.id} 未复用 fuyao 凭据"
-
-        fanout = pull.fanout
-        assert fanout, f"{preset.id} 缺少两级拉取配方"
-        assert fanout["url"].startswith("https://"), f"{preset.id} fanout 缺少第二级 URL"
-        for key in ("param", "id_field", "member_id_field",
-                    "symbol_col", "name_col", "value_col"):
-            assert fanout.get(key), f"{preset.id} fanout 缺少 {key}"
-        assert fanout.get("separator"), f"{preset.id} fanout 缺少拼接符"
+        assert pull.url.startswith("http://127.0.0.1:3021/boards"), (
+            f"{preset.id} 未指向本地 aksource 板块端点"
+        )
+        assert pull.response_path == "data", f"{preset.id} 缺少响应路径"
+        # 免鉴权: 本地聚合端点无需凭据
+        assert pull.auth.get("type") == "none", f"{preset.id} 应为免鉴权"
+        # 字段映射: board_list → 目标列 (所属概念 / 所属同花顺行业)
+        assert pull.field_map and "board_list" in pull.field_map, (
+            f"{preset.id} 缺少 board_list 字段映射"
+        )
+        # 单请求形态, 不再是两级 fanout
+        assert not pull.fanout, f"{preset.id} 不应再携带 fanout"
+        # 全量聚合 20-60s, 超时须留足余量
+        assert pull.timeout_seconds >= 120, f"{preset.id} 超时不足"
 
 
 def test_ensure_builtin_presets_writes_complete_configs(tmp_path: Path) -> None:
-    """全新数据目录: 启动即落完整配方, 两张表都带 fanout。"""
+    """全新数据目录: 启动即落完整配方 (aksource 单请求 + 字段映射)。"""
     asyncio.run(ensure_builtin_presets(tmp_path))
 
     store = ExtConfigStore(tmp_path)
@@ -55,8 +60,9 @@ def test_ensure_builtin_presets_writes_complete_configs(tmp_path: Path) -> None:
         config = store.get(cid)
         assert config is not None, f"{cid} 配置未创建"
         assert config.pull is not None, f"{cid} 出厂配方未写入"
-        assert config.pull.url, f"{cid} 第一级 URL 为空"
-        assert config.pull.fanout, f"{cid} 两级配方未写入"
+        assert config.pull.url.startswith("http://127.0.0.1:3021/boards"), (
+            f"{cid} 配方未指向本地 aksource"
+        )
 
 
 # ------------------------------------------------------- 只播种一次 (不复活)
@@ -71,10 +77,7 @@ def test_seed_marker_written_on_first_install_and_survives_delete(tmp_path: Path
 
 
 def test_deleted_builtin_preset_is_not_resurrected(tmp_path: Path) -> None:
-    """已播种后删除内置表 → 重启不复活 (用户可能已接自有概念/行业源)。
-
-    复活会让两套表并存, 内置表每天再拉 710 次成分股调用。
-    """
+    """已播种后删除内置表 → 重启不复活 (用户可能已接自有概念/行业源)。"""
     asyncio.run(ensure_builtin_presets(tmp_path))
     store = ExtConfigStore(tmp_path)
     assert store.delete("ext_gn_ths") is True
@@ -112,7 +115,9 @@ def test_ensure_builtin_presets_fills_empty_shell(tmp_path: Path) -> None:
 
     refreshed = ExtConfigStore(tmp_path).get("ext_gn_ths")
     assert refreshed is not None and refreshed.pull is not None
-    assert refreshed.pull.fanout, "空壳配置未被补齐为完整配方"
+    assert refreshed.pull.url.startswith("http://127.0.0.1:3021/boards"), (
+        "空壳配置未被补齐为当前配方"
+    )
 
 
 def test_ensure_builtin_presets_keeps_custom_user_pull(tmp_path: Path) -> None:
@@ -136,7 +141,11 @@ def test_ensure_builtin_presets_keeps_custom_user_pull(tmp_path: Path) -> None:
 
 
 def test_ensure_builtin_presets_replaces_retired_factory_pulls(tmp_path: Path) -> None:
-    """pull.url 命中历代废弃出厂值 → 替换为带 fanout 的当前配方。"""
+    """pull.url 命中历代废弃出厂值 → 替换为当前配方。
+
+    指纹含 fuyao fanout 形态: 已配置鉴权但用户从未配 Key 的恒失败配置,
+    与空壳等价, 启动时同样要迁移到 aksource 配方。
+    """
     asyncio.run(ensure_builtin_presets(tmp_path))
     store = ExtConfigStore(tmp_path)
 
@@ -144,15 +153,29 @@ def test_ensure_builtin_presets_replaces_retired_factory_pulls(tmp_path: Path) -
         config = store.get(cid)
         assert config is not None
         for retired in _RETIRED_FACTORY_PULLS[cid]:
-            config.pull = PullConfig(url=retired["url"], enabled=True)
+            # 分别以「无 fanout 目录标记」与「fuyao fanout 形态」落库验证迁移
+            pull = PullConfig(url=retired["url"], enabled=True)
+            if retired.get("fanout"):
+                pull.fanout = {
+                    "url": "https://fuyao.aicubes.cn/api/a-share-index/constituents/ths-stock-list",
+                    "param": "thscode",
+                    "id_field": "thscode",
+                    "items_path": "data.item",
+                    "member_id_field": "thscode",
+                    "symbol_col": "股票代码",
+                    "name_col": "股票简称",
+                    "value_col": "所属概念",
+                    "separator": ";",
+                }
+            config.pull = pull
             store.upsert(config)
 
             asyncio.run(ensure_builtin_presets(tmp_path))
 
             refreshed = ExtConfigStore(tmp_path).get(cid)
             assert refreshed is not None and refreshed.pull is not None
-            assert refreshed.pull.fanout, (
-                f"{cid} 旧出厂配方 {retired['url']} 未替换为带 fanout 的当前配方"
+            assert refreshed.pull.url.startswith("http://127.0.0.1:3021/boards"), (
+                f"{cid} 旧出厂配方 {retired['url']} 未替换为当前配方"
             )
 
 
