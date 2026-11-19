@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import threading
@@ -894,6 +895,17 @@ def _refresh_boards(kind: str) -> list[dict]:
         client.close()
 
     # 反转: 股票 → 板块名清单 (跟随目录顺序, 拼接结果稳定)
+    rows = _boards_rows(catalog)
+    ok = sum(1 for e in catalog if e["members"])
+    log.info(
+        "boards %s refresh: %d boards (%d ok), %d stocks",
+        kind, len(catalog), ok, len(rows),
+    )
+    return rows
+
+
+def _boards_rows(catalog: list[dict]) -> list[dict]:
+    """目录+成分反转成「股票 → 板块清单」行 (东财/新浪共用)。"""
     agg: dict[str, dict] = {}
     for e in catalog:
         for m in e["members"]:
@@ -903,8 +915,7 @@ def _refresh_boards(kind: str) -> list[dict]:
                 agg[m["code"]] = row
             if e["name"] not in row["_labels"]:
                 row["_labels"].append(e["name"])
-
-    rows = [
+    return [
         {
             "股票代码": r["股票代码"],
             "股票简称": r["股票简称"],
@@ -912,9 +923,104 @@ def _refresh_boards(kind: str) -> list[dict]:
         }
         for r in agg.values()
     ]
+
+
+# ---------------- 板块成分降级源 (新浪: 东财 clist 被风控时自动切换) ----------------
+# 新浪行业/概念目录 + 成分股接口与东财同构, 数据口径略有差异但作为
+# 扩展表 (概念/行业归属) 完全可用。目录页 GBK 编码 (http_get 已按 GBK 解码),
+# 成分接口返回 UTF-8 JSON 数组。
+SINA_HY_CATALOG = "http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+SINA_GN_CATALOG = "http://vip.stock.finance.sina.com.cn/q/view/newFLJK.php?param=class"
+SINA_NODE_DATA = (
+    "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php"
+    "/Market_Center.getHQNodeData"
+)
+
+
+def _sina_board_catalog(kind: str) -> list[dict]:
+    """新浪板块目录: 行业 newSinaHy / 概念 newFLJK。
+
+    返回 [{"bk": "new_blhy", "name": "玻璃行业", "count": 19, "members": []}]
+    (count = 目录第 3 字段成分股数, 用于成分分页上界)。
+    """
+    url = SINA_HY_CATALOG if kind == "industry" else SINA_GN_CATALOG
+    text = http_get(url, retries=2, timeout=15.0)
+    if not text:
+        return []
+    m = re.search(r"=\s*(\{.*\})\s*$", text, re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return []
+    out: list[dict] = []
+    for node_id, val in (data or {}).items():
+        parts = str(val).split(",")
+        if len(parts) < 3:
+            continue
+        name = parts[1].strip()
+        try:
+            count = int(parts[2])
+        except ValueError:
+            count = 0
+        if node_id and name:
+            out.append({"bk": node_id, "name": name, "count": count, "members": []})
+    return out
+
+
+def _sina_board_members(client: Any, node_id: str, count: int) -> list[dict]:
+    """新浪板块成分股: [{"code": "600176", "name": "中国巨石"}, ...], 分页 100/页。"""
+    pages = max(1, min((count + 99) // 100 or 1, 60))
+    out: list[dict] = []
+    for pn in range(1, pages + 1):
+        url = f"{SINA_NODE_DATA}?node={node_id}&num=100&page={pn}&sort=symbol&asc=1"
+        rows = None
+        for _ in range(3):
+            try:
+                r = client.get(url)
+                if r.status_code == 200 and r.content.strip():
+                    rows = r.json()
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.3)
+        if not rows:
+            break
+        for it in rows:
+            code = str(it.get("code") or "").strip()
+            name = str(it.get("name") or "").strip()
+            if code and name:
+                out.append({"code": code, "name": name})
+        if len(rows) < 100:
+            break
+    return out
+
+
+def _refresh_boards_sina(kind: str) -> list[dict]:
+    """新浪降级全量刷新: 目录 + 逐板块成分 (8 并发)。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    catalog = _sina_board_catalog(kind)
+    if not catalog:
+        raise RuntimeError("板块目录拉取失败 (新浪接口也不可达)")
+
+    client = _em_client()
+    try:
+        def fetch(entry: dict) -> None:
+            entry["members"] = _sina_board_members(
+                client, entry["bk"], entry.get("count", 0)
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(fetch, catalog))
+    finally:
+        client.close()
+
+    rows = _boards_rows(catalog)
     ok = sum(1 for e in catalog if e["members"])
     log.info(
-        "boards %s refresh: %d boards (%d ok), %d stocks",
+        "boards %s refresh (sina fallback): %d boards (%d ok), %d stocks",
         kind, len(catalog), ok, len(rows),
     )
     return rows
@@ -937,7 +1043,12 @@ def boards(kind: str = "concept") -> dict:
         if st and st["rows"] and time.time() - st["last_ok"] < _BOARDS_TTL:
             return {"data": st["rows"]}
 
-    rows = _refresh_boards(kind)
+    # 主路: 东财 push2 clist; 被风控/不可达时降级新浪目录+成分接口
+    try:
+        rows = _refresh_boards(kind)
+    except Exception as e:  # noqa: BLE001
+        log.warning("boards %s 东财源失败 (%s), 切换新浪降级源", kind, e)
+        rows = _refresh_boards_sina(kind)
 
     with _BOARDS_LOCK:
         _BOARDS_CACHE[kind] = {"rows": rows, "last_ok": time.time()}
