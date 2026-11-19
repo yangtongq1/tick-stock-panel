@@ -1213,6 +1213,149 @@ def zt_pool(
     return {"data": rows, "date": d, "pool": pool}
 
 
+# ---------------------------------------------------------------------------
+# 资金流向 (新浪 vip.stock.finance): 个股排行 / 板块资金 / 个股历史
+# ---------------------------------------------------------------------------
+
+SINA_MF = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow"
+
+_MF_TTL = 300.0  # 盘中 5 分钟 (与东财口径一致)
+_MF_CACHE: dict[str, dict] = {}
+_MF_LOCK = threading.Lock()
+
+
+def _mf_get(path: str, params: str) -> list | None:
+    """新浪 MoneyFlow 请求 (宽松 JSON → 标准 JSON 解析)。失败返回 None。"""
+    url = f"{SINA_MF}.{path}?{params}"
+    for attempt in range(3):
+        try:
+            r = _requests_mod.get(url, headers=HEADERS, timeout=10)
+            if r.status_code == 200 and r.content.strip():
+                raw = r.text.strip()
+                # 新浪返回宽松 JSON (键不带引号): {symbol:"sz000001",...}
+                # 标准化后解析; json.loads 直接吃多数场景, 失败时引号修补重试
+                import json as _json
+                try:
+                    data = _json.loads(raw)
+                    return data if isinstance(data, list) else None
+                except ValueError:
+                    fixed = re.sub(r'([{,])(\w+)\s*:', r'\1"\2":', raw)
+                    data = _json.loads(fixed)
+                    return data if isinstance(data, list) else None
+        except (ValueError, _requests_exc):  # noqa: BLE001
+            pass
+        if attempt < 2:
+            time.sleep(0.5)
+    return None
+
+
+def _mf_stock_rows(num: int = 200) -> list[dict]:
+    """个股资金流排行 (今日, 净流入降序)。
+
+    输出列: 股票代码/简称/最新价/涨跌幅/成交额/流入额/流出额/净流入/
+            净流入率/特大单净额/大单净额/中单净额/小单净额/换手率
+    """
+    rows = _mf_get(
+        "ssl_bkzj_ssggzj",
+        f"page=1&num={num}&sort=netamount&asc=0&bankuai=&shichang=",
+    )
+    out: list[dict] = []
+    for it in rows or []:
+        def _f(key: str) -> float | None:
+            v = it.get(key)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        sym = str(it.get("symbol") or "")
+        out.append({
+            "股票代码": sym,
+            "股票简称": str(it.get("name") or ""),
+            "最新价": _f("trade"),
+            "涨跌幅": round((_f("changeratio") or 0.0) * 100.0, 4),
+            "成交额": _f("amount"),
+            "流入额": _f("inamount"),
+            "流出额": _f("outamount"),
+            "净流入": _f("netamount"),
+            "净流入率": _f("ratioamount"),
+            "特大单净额": _f("r0_net"),
+            "大单净额": _f("r1_net"),
+            "中单净额": _f("r2_net"),
+            "小单净额": _f("r3_net"),
+            "换手率": _f("turnover"),
+        })
+    return out
+
+
+def _mf_board_rows(kind: str = "hangye") -> list[dict]:
+    """板块资金流排行 (行业/概念, 净流入降序)。"""
+    rows = _mf_get(
+        "ssl_bkzj_bk",
+        f"page=1&num=100&sort=netamount&asc=0&fenlei={kind}",
+    )
+    out: list[dict] = []
+    for it in rows or []:
+        def _f(key: str) -> float | None:
+            v = it.get(key)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        out.append({
+            "板块代码": str(it.get("category") or ""),
+            "板块名称": str(it.get("name") or ""),
+            "平均价": _f("avg_price"),
+            "平均涨跌幅": round((_f("avg_changeratio") or 0.0) * 100.0, 4),
+            "换手率": _f("turnover"),
+            "成交额": _f("trade"),
+            "流入额": _f("inamount"),
+            "流出额": _f("outamount"),
+            "净流入": _f("netamount"),
+            "净流入率": _f("ratioamount"),
+        })
+    return out
+
+
+@app.get("/fund_flow")
+def fund_flow(
+    kind: str = "stock",
+    num: int = 200,
+    refresh: bool = False,
+) -> dict:
+    """资金流向 (新浪源)。
+
+    kind=stock     : 个股资金流排行 (今日, 净流入降序, num 上限 1000)
+    kind=hangye    : 行业板块资金流排行
+    kind=gainian   : 概念板块资金流排行
+    盘中缓存 5 分钟; refresh=true 绕过。
+    """
+    kind = (kind or "stock").strip().lower()
+    num = max(1, min(int(num), 1000)) if kind == "stock" else 100
+    with _MF_LOCK:
+        st = _MF_CACHE.get(kind)
+        if st and not refresh and time.time() - st["last_ok"] < _MF_TTL:
+            return {"data": st["rows"], "kind": kind}
+
+    try:
+        if kind == "stock":
+            rows = _mf_stock_rows(num)
+        elif kind in ("hangye", "gainian"):
+            rows = _mf_board_rows("hangye" if kind == "hangye" else "gn")
+        else:
+            return {"data": [], "error": "kind 必须为 stock / hangye / gainian"}
+    except Exception as e:  # noqa: BLE001
+        with _MF_LOCK:
+            stale = _MF_CACHE.get(kind)
+        if stale:
+            return {"data": stale["rows"], "kind": kind, "stale": True}
+        return {"data": [], "error": f"新浪资金流接口失败: {e}", "kind": kind}
+
+    with _MF_LOCK:
+        _MF_CACHE[kind] = {"rows": rows, "last_ok": time.time()}
+    log.info("fund_flow %s: %d rows", kind, len(rows))
+    return {"data": rows, "kind": kind}
+
+
 @app.on_event("startup")
 def _start_full_rt_refresher() -> None:
     """FastAPI startup: 拉起全市场行情后台刷新线程 (90s 一轮)"""

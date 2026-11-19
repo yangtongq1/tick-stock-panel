@@ -97,3 +97,42 @@ def test_zt_deleted_after_batch_seed_not_resurrected(tmp_path: Path) -> None:
 
     asyncio.run(ensure_builtin_presets(tmp_path))
     assert store.get("ext_zt_pool") is None, "已送达批次后删除的表不应复活"
+
+
+# ------------------------------------------------------- 资金流向 (v3 批次)
+
+_FF_IDS = ("ext_fund_flow", "ext_fund_flow_board")
+
+
+def test_fund_flow_presets_ship_with_complete_pull() -> None:
+    """资金流两表出厂配方: aksource 端点 / 数值字段类型必须 float (非 number)。"""
+    from app.services.ext_presets import _presets
+    presets = {p.id: p for p in _presets() if p.id in _FF_IDS}
+    assert set(presets) == set(_FF_IDS)
+    for cid, preset in presets.items():
+        pull = preset.pull
+        assert pull is not None, f"{cid} 出厂未带拉取配方"
+        assert pull.url.startswith("http://127.0.0.1:3021/fund_flow")
+        assert preset.mode == "timeseries"
+        assert pull.time_field == "__pull_ts__"
+        assert pull.schedule_trading_only
+        # 字段类型必须是 float/int/string/bool —— "number" 不在 dtype 映射里会退化成字符串
+        for f in preset.fields:
+            assert f.dtype in ("string", "int", "float", "bool"), (
+                f"{cid} 字段 {f.name} 类型 {f.dtype} 不在 dtype 映射, 会退化成 Utf8"
+            )
+    # 个股表带 symbol 映射; 板块表是 market_level (无标的关联)
+    stock = presets["ext_fund_flow"]
+    assert stock.symbol_map.get("col") == "股票代码"
+    for must in ("净流入", "特大单净额", "大单净额"):
+        assert any(f.name == must for f in stock.fields)
+    board = presets["ext_fund_flow_board"]
+    assert board.market_level, "板块资金流必须是 market_level 表"
+
+
+def test_fund_flow_batch_v3_seeded_on_existing_library(tmp_path: Path) -> None:
+    """v3 批次 (资金流两表) 送达到已播种的老库。"""
+    asyncio.run(ensure_builtin_presets(tmp_path))
+    store = ExtConfigStore(tmp_path)
+    for cid in _FF_IDS:
+        assert store.get(cid) is not None, f"{cid} 未随 v3 批次创建"

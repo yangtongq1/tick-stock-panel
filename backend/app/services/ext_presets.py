@@ -54,10 +54,12 @@ _SEED_MARKER = ".builtin_presets_seeded"
 # 出厂批次标记: 播种机制上线后新增的内置表, 用独立批次标记送达到老库
 # (既不复活用户删过的旧表, 也让新批次表正常创建)。值为批次号, 逐批递增。
 # v2 = 2026-11-19 涨停板三池 (ext_zt_pool / ext_zb_pool / ext_dt_pool)。
+# v3 = 2026-11-19 资金流向 (ext_fund_flow / ext_fund_flow_board)。
 _SEED_BATCH_MARKER = ".builtin_presets_batch"
-_SEED_BATCH_VERSION = 2
+_SEED_BATCH_VERSION = 3
 _SEED_BATCH_MEMBERS = {
     2: ("ext_zt_pool", "ext_zb_pool", "ext_dt_pool"),
+    3: ("ext_fund_flow", "ext_fund_flow_board"),
 }
 
 
@@ -150,25 +152,25 @@ def _industry_preset() -> ExtConfig:
 _ZT_FIELDS_COMMON = [
     ("股票简称", "string", "股票简称"),
     ("交易所", "string", "交易所"),
-    ("最新价", "number", "最新价"),
-    ("涨跌幅", "number", "涨跌幅 %"),
-    ("成交额", "number", "成交额 元"),
-    ("流通市值", "number", "流通市值 元"),
-    ("总市值", "number", "总市值 元"),
-    ("换手率", "number", "换手率 %"),
+    ("最新价", "float", "最新价"),
+    ("涨跌幅", "float", "涨跌幅 %"),
+    ("成交额", "float", "成交额 元"),
+    ("流通市值", "float", "流通市值 元"),
+    ("总市值", "float", "总市值 元"),
+    ("换手率", "float", "换手率 %"),
     ("所属行业", "string", "所属行业"),
     ("首次封板时间", "string", "首次封板时间"),
     ("最后封板时间", "string", "最后封板时间"),
-    ("炸板次数", "number", "炸板次数"),
-    ("封板资金", "number", "封板资金 元"),
-    ("连板数", "number", "连板数"),
+    ("炸板次数", "float", "炸板次数"),
+    ("封板资金", "float", "封板资金 元"),
+    ("连板数", "float", "连板数"),
     ("涨停统计", "string", "涨停统计 (次数/天数)"),
 ]
 
 _ZT_POOLS_DEF = (
-    ("zt", "ext_zt_pool", "涨停股池", [("涨停价", "number", "涨停价")]),
-    ("zb", "ext_zb_pool", "炸板股池", [("涨停价", "number", "涨停价"), ("振幅", "number", "振幅 %"), ("涨速", "number", "涨速")]),
-    ("dt", "ext_dt_pool", "跌停股池", [("封单资金", "number", "封单资金 元")]),
+    ("zt", "ext_zt_pool", "涨停股池", [("涨停价", "float", "涨停价")]),
+    ("zb", "ext_zb_pool", "炸板股池", [("涨停价", "float", "涨停价"), ("振幅", "float", "振幅 %"), ("涨速", "float", "涨速")]),
+    ("dt", "ext_dt_pool", "跌停股池", [("封单资金", "float", "封单资金 元")]),
 )
 
 
@@ -210,8 +212,91 @@ def _zt_pool_preset(pool: str, config_id: str, label: str, extra_fields: list[tu
     )
 
 
+def _fund_flow_preset() -> ExtConfig:
+    """个股资金流排行 (新浪源, 经本地 aksource 聚合) — timeseries 每日累积。
+
+    新浪接口为当日快照 (无历史参数), 盘中多盘 time_field 去重;
+    每日一分区自然形成历史序列 (从启用日起累积)。
+    主力口径: 净流入 = 全单净额; 另带特大/大/中/小单净额四档。
+    ETF/指数行会随 symbol 关联自然过滤 (instruments 维表无此标的)。
+    """
+    return ExtConfig(
+        id="ext_fund_flow",
+        label="个股资金流",
+        mode="timeseries",
+        fields=[
+            ExtField("symbol", "string", "标的代码"),
+            ExtField("code", "string", "代码"),
+            ExtField("股票代码", "string", "股票代码"),
+            ExtField("股票简称", "string", "股票简称"),
+            ExtField("最新价", "float", "最新价"),
+            ExtField("涨跌幅", "float", "涨跌幅 %"),
+            ExtField("成交额", "float", "成交额 元"),
+            ExtField("流入额", "float", "流入额 元"),
+            ExtField("流出额", "float", "流出额 元"),
+            ExtField("净流入", "float", "净流入 元"),
+            ExtField("净流入率", "float", "净流入率 %"),
+            ExtField("特大单净额", "float", "特大单净额 元"),
+            ExtField("大单净额", "float", "大单净额 元"),
+            ExtField("中单净额", "float", "中单净额 元"),
+            ExtField("小单净额", "float", "小单净额 元"),
+            ExtField("换手率", "float", "换手率 %"),
+        ],
+        description="个股资金流排行 (新浪源, 经本地 aksource 聚合; 净流入/特大/大/中/小单五档)",
+        symbol_map={"type": "mapped", "col": "股票代码"},
+        code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
+        pull=PullConfig(
+            url="http://127.0.0.1:3021/fund_flow?kind=stock&num=1000",
+            method="GET",
+            response_path="data",
+            field_map={},
+            auth={"type": "none"},
+            timeout_seconds=60,
+            schedule_minutes=30,
+            schedule_trading_only=True,
+            time_field="__pull_ts__",
+            enabled=True,
+        ),
+    )
+
+
+def _fund_flow_board_preset() -> ExtConfig:
+    """行业板块资金流 (新浪源) — market_level 表 (行=板块, 无 symbol 关联)。"""
+    return ExtConfig(
+        id="ext_fund_flow_board",
+        label="板块资金流",
+        mode="timeseries",
+        market_level=True,
+        fields=[
+            ExtField("板块代码", "string", "板块代码"),
+            ExtField("板块名称", "string", "板块名称"),
+            ExtField("平均价", "float", "平均价"),
+            ExtField("平均涨跌幅", "float", "平均涨跌幅 %"),
+            ExtField("换手率", "float", "换手率 %"),
+            ExtField("成交额", "float", "成交额 元"),
+            ExtField("流入额", "float", "流入额 元"),
+            ExtField("流出额", "float", "流出额 元"),
+            ExtField("净流入", "float", "净流入 元"),
+            ExtField("净流入率", "float", "净流入率 %"),
+        ],
+        description="行业板块资金流排行 (新浪源, 经本地 aksource 聚合; 板块级无标的关联)",
+        pull=PullConfig(
+            url="http://127.0.0.1:3021/fund_flow?kind=hangye",
+            method="GET",
+            response_path="data",
+            field_map={},
+            auth={"type": "none"},
+            timeout_seconds=60,
+            schedule_minutes=30,
+            schedule_trading_only=True,
+            time_field="__pull_ts__",
+            enabled=True,
+        ),
+    )
+
+
 def _presets() -> list[ExtConfig]:
-    return [_concept_preset(), _industry_preset()] + [
+    return [_concept_preset(), _industry_preset(), _fund_flow_preset(), _fund_flow_board_preset()] + [
         _zt_pool_preset(pool, cid, label, extra)
         for pool, cid, label, extra in _ZT_POOLS_DEF
     ]
