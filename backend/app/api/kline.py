@@ -564,6 +564,102 @@ def _daily_freshness(request: Request, rows: list[dict], end: date) -> dict:
     return QuoteFreshness.for_request(request).describe(rows[-1] if rows else None, historical=end < cn_today())
 
 
+# ---------------------------------------------------------------------------
+# 筹码分布 (CYQ)
+# ---------------------------------------------------------------------------
+
+# 单股 CYQ 结果缓存: (symbol, as_of, buckets) → payload。
+# 个股弹窗打开时前端会在每个行情 tick 重拉本接口, 而筹码分布只随日K变化
+# (盘中最多影响最后一根蜡烛), 全量逐日迭代 210 天 × 120 桶完全可以命中缓存。
+# 服务进程内 LRU 即可 — 多 worker 部署各自持有一份, 数据一致性无影响。
+_CYQ_CACHE: dict[tuple[str, str, int], dict] = {}
+_CYQ_CACHE_MAX = 128
+
+
+@router.get("/cyq")
+def get_cyq(
+    request: Request,
+    symbol: str = Query(..., description="标的代码,如 000001.SZ"),
+    buckets: int = Query(120, ge=20, le=240),
+    lookback: int = Query(210, ge=30, le=500, description="回溯交易日数"),
+):
+    """单股筹码分布 (CYQ): 三角形分布 + 换手率衰减模型。
+
+    返回价格桶占比 (筹码峰) + 获利比例 / 平均成本 / 70%、90% 成本区间 / 集中度。
+    只支持股票 (筹码分布依赖流通股本算换手率); ETF/指数返回 400。
+    """
+    from datetime import timedelta
+
+    from app.services.cyq import DEFAULT_LOOKBACK_DAYS, compute_cyq
+
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    if asset_type != "stock":
+        raise HTTPException(status_code=400, detail="筹码分布仅支持股票标的")
+
+    stock_info = _get_stock_info(repo, symbol)
+    float_shares = stock_info.get("float_shares") or 0.0
+    if not float_shares or float_shares <= 0:
+        raise HTTPException(
+            status_code=404,
+            detail="缺少流通股本数据, 无法计算筹码分布 (请先同步标的维表)",
+        )
+
+    # 取数: lookback 交易日 ≈ lookback * 1.5 日历日, 与 get_daily 同源的
+    # enriched 读取 + 实时蜡烛注入, 保证与 K 线图看到的是同一份数据。
+    end = cn_today()
+    start = end - timedelta(days=int(lookback * 1.6) + 30)
+    df = repo.get_daily(symbol, start, end)
+    if df.is_empty():
+        raise HTTPException(status_code=404, detail="无日K数据, 无法计算筹码分布")
+
+    # 盘中用实时价替代最后一根 close, 让获利比例贴住现价
+    last_price = None
+    try:
+        live = _latest_live_candle(request, symbol, "stock")
+        if live is not None:
+            lp = live.get("close")
+            if lp and math.isfinite(float(lp)) and float(lp) > 0:
+                last_price = float(lp)
+    except Exception:  # noqa: BLE001
+        last_price = None
+
+    # 缓存键: 数据截止日 + 桶数; 盘中实时价变化只影响 profit_ratio,
+    # 用 last_price 也参与键会基本全 miss, 收益不大 — 盘中每分钟级足够。
+    as_of = str(df["date"][-1])
+    cache_key = (symbol, as_of, buckets)
+    hit = _CYQ_CACHE.get(cache_key)
+    if hit is not None and hit.get("last_price") == last_price:
+        return hit
+
+    result = compute_cyq(df, float_shares=float_shares, last_price=last_price, buckets=buckets)
+    if result is None:
+        raise HTTPException(status_code=404, detail="筹码分布计算失败 (日K数据不足)")
+
+    payload = {
+        "symbol": symbol,
+        "name": stock_info.get("name"),
+        "as_of": result.as_of.isoformat() if hasattr(result.as_of, "isoformat") else str(result.as_of),
+        "lookback_days": result.lookback_days,
+        "buckets": result.buckets,
+        "last_price": last_price,
+        "price_low": result.price_low,
+        "price_high": result.price_high,
+        "prices": result.prices,
+        "ratios": result.ratios,
+        "profit_ratio": result.profit_ratio,
+        "avg_cost": result.avg_cost,
+        "cost_70": list(result.cost_70),
+        "cost_90": list(result.cost_90),
+        "concentration": result.concentration,
+    }
+
+    if len(_CYQ_CACHE) >= _CYQ_CACHE_MAX:
+        _CYQ_CACHE.pop(next(iter(_CYQ_CACHE)), None)
+    _CYQ_CACHE[cache_key] = payload
+    return payload
+
+
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
