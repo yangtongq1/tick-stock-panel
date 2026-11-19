@@ -660,6 +660,156 @@ def get_cyq(
     return payload
 
 
+# ── K 线形态识别 (Candlestick Patterns) ────────────────────────────
+_PATTERN_CACHE: dict[tuple[str, str, int], dict] = {}
+_PATTERN_CACHE_MAX = 128
+
+
+@router.get("/patterns")
+def get_patterns(
+    request: Request,
+    symbol: str = Query(..., description="标的代码,如 000001.SZ"),
+    days: int = Query(60, ge=10, le=250, description="返回最近 N 个交易日的形态命中"),
+) -> dict:
+    """单股 K 线形态识别: 26 种经典蜡烛图形态 (锤子/吞没/晨星/红三兵等)。
+
+    返回最近 N 日每日命中形态列表 [{date, pattern, label_cn, direction, value}],
+    只含命中日 (无形态的日子不占行)。direction: +1 看涨 / -1 看跌 / 0 中性。
+    """
+    from app.services.cdl_patterns import PATTERN_BY_NAME, compute_patterns
+
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    if asset_type not in ("stock", "etf", "index"):
+        raise HTTPException(status_code=400, detail="仅支持股票/ETF/指数标的")
+
+    end = cn_today()
+    # 形态最长需要 5 根历史 (梯底/上升三法) + 自适应阈值 14 根 → 回溯窗口放大
+    start = end - timedelta(days=int(days * 1.6) + 60)
+
+    if asset_type == "stock":
+        df = repo.get_daily(symbol, start, end)
+    elif asset_type == "etf":
+        df = repo.get_etf_daily(symbol, start, end)
+    else:
+        df = repo.get_index_daily(symbol, start, end)
+
+    res = compute_patterns(df)
+    if res.is_empty():
+        return {"symbol": symbol, "days": days, "hits": []}
+
+    # 只保留最近 N 日
+    res = res.tail(days)
+
+    hits = []
+    for row in res.to_dicts():
+        for name, val in row.items():
+            if name == "date" or val == 0:
+                continue
+            p = PATTERN_BY_NAME[name]
+            hits.append({
+                "date": str(row["date"]),
+                "pattern": name,
+                "label_cn": p.label_cn,
+                "direction": p.direction,
+                "value": val,
+            })
+    return {"symbol": symbol, "days": days, "hits": hits}
+
+
+@router.post("/patterns/scan")
+def scan_patterns(
+    request: Request,
+    body: dict,
+) -> dict:
+    """全市场形态扫描: 找出最近交易日命中指定形态/方向的股票。
+
+    body: {patterns?: [形态名], direction?: +1|-1|0|None(全部), last_n?: 1}
+    输出 {total_hits, elapsed_ms, patterns: {形态: 计数}, rows: [...]}
+    """
+    import time as _time
+
+    import polars as pl
+
+    from app.services.cdl_patterns import PATTERN_BY_NAME, scan_market_patterns
+
+    patterns_wanted = body.get("patterns") or None
+    direction = body.get("direction")
+    last_n = int(body.get("last_n") or 1)
+    last_n = max(1, min(5, last_n))
+
+    if patterns_wanted:
+        bad = [p for p in patterns_wanted if p not in PATTERN_BY_NAME]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"未知形态: {bad}")
+    if direction not in (None, 1, -1, 0):
+        raise HTTPException(status_code=400, detail="direction 仅支持 +1/-1/0/None")
+
+    repo = request.app.state.repo
+    cache, _cache_date = repo.get_enriched_latest_asset("stock")
+    if cache is None or cache.is_empty() or "symbol" not in cache.columns:
+        raise HTTPException(status_code=404, detail="股票池不可用 (enriched 快照为空)")
+
+    symbols = cache["symbol"].to_list()
+    name_map = (
+        dict(zip(cache["symbol"].to_list(), cache["name"].to_list()))
+        if "name" in cache.columns else {}
+    )
+
+    # 全量扫描 ~54s (5000+ 股 × 26 形态); 同一交易日 + last_n 的全量命中缓存,
+    # patterns/direction 过滤在缓存之上进行 — 二次查询毫秒级返回。
+    end = cn_today()
+    cache_key = ("scan", str(end), last_n)
+    hit_all = _PATTERN_CACHE.get(cache_key)
+    if hit_all is None:
+        # 取每只股票最近 ~25 交易日 (足够最长 5 根形态 + 阈值预热)
+        start = end - timedelta(days=45)
+        cols = ["symbol", "date", "open", "high", "low", "close"]
+        daily_all = repo.get_daily_batch(symbols, start, end, columns=cols)
+        if daily_all.is_empty():
+            raise HTTPException(status_code=404, detail="无日K数据")
+
+        t0 = _time.perf_counter()
+        hits_all = scan_market_patterns(daily_all, last_n=last_n)
+        elapsed = _time.perf_counter() - t0
+
+        rows_all = []
+        for r in hits_all.to_dicts():
+            p = PATTERN_BY_NAME[r["pattern"]]
+            rows_all.append({
+                "symbol": r["symbol"],
+                "name": name_map.get(r["symbol"]),
+                "date": str(r["date"]),
+                "pattern": r["pattern"],
+                "label_cn": p.label_cn,
+                "direction": p.direction,
+            })
+        hit_all = {"rows": rows_all, "elapsed_ms": int(elapsed * 1000)}
+        if len(_PATTERN_CACHE) >= _PATTERN_CACHE_MAX:
+            _PATTERN_CACHE.pop(next(iter(_PATTERN_CACHE)), None)
+        _PATTERN_CACHE[cache_key] = hit_all
+
+    rows = list(hit_all["rows"])
+    elapsed = hit_all["elapsed_ms"]
+    if patterns_wanted:
+        wanted = set(patterns_wanted)
+        rows = [r for r in rows if r["pattern"] in wanted]
+    if direction is not None:
+        rows = [r for r in rows if r["direction"] == direction]
+    rows.sort(key=lambda r: (r["pattern"], r["symbol"]))
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["pattern"]] = counts.get(r["pattern"], 0) + 1
+
+    return {
+        "total_hits": len(rows),
+        "elapsed_ms": elapsed,
+        "patterns": counts,
+        "rows": rows,
+    }
+
+
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
