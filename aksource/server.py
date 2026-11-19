@@ -1055,6 +1055,164 @@ def boards(kind: str = "concept") -> dict:
     return {"data": rows}
 
 
+# ---------------------------------------------------------------------------
+# 涨停板三池 (东方财富 push2ex): 涨停池 / 炸板池 / 跌停池
+# ---------------------------------------------------------------------------
+
+# 直连 HTTP (本机 push2ex HTTPS 不稳, HTTP 稳定实测可用)
+EM_ZT_BASE = "http://push2ex.eastmoney.com"
+EM_ZT_UT = "7eea3edcaed734bea9cbfc24409ed989"
+
+# 三池缓存: {pool: {date: {"rows": [...], "last_ok": t}}}; 当日盘中 TTL 5 分钟
+_ZT_POOLS = {
+    "zt": "getTopicZTPool",     # 涨停池
+    "zb": "getTopicZBPool",     # 炸板池 (触涨停后打开)
+    "dt": "getTopicDTPool",     # 跌停池
+}
+_ZT_TTL_INTRADAY = 300.0       # 当日盘中 5 分钟
+_ZT_TTL_HISTORY = 3600.0 * 24  # 历史日期 (不会再变) 24 小时
+_ZT_CACHE: dict[tuple[str, str], dict] = {}
+_ZT_LOCK = threading.Lock()
+
+
+def _zt_pool_date(date_str: str | None) -> str:
+    """规范化日期参数: YYYYMMDD; 缺省取今天 (北京时间)。"""
+    if date_str:
+        s = re.sub(r"\D", "", date_str)
+        if len(s) == 8:
+            return s
+    return datetime.now().strftime("%Y%m%d")
+
+
+def _fetch_zt_pool(pool: str, d: str) -> list[dict]:
+    """拉取单池全量 (分页聚合)。返回行 list; 失败抛 RuntimeError。"""
+    ep = _ZT_POOLS[pool]
+    sort_map = {"zt": "fbt%3Aasc", "zb": "fbt%3Aasc", "dt": "fund%3Aasc"}
+    rows: list[dict] = []
+    page = 0
+    while page < 30:
+        url = (
+            f"{EM_ZT_BASE}/{ep}?ut={EM_ZT_UT}&dpt=wz.ztzt"
+            f"&Pageindex={page}&pagesize=200&sort={sort_map[pool]}&date={d}"
+        )
+        for attempt in range(3):
+            try:
+                r = _requests_mod.get(url, headers=HEADERS, timeout=8)
+                if r.status_code == 200 and r.content.strip():
+                    break
+            except _requests_exc:  # noqa: BLE001
+                pass
+            if attempt < 2:
+                time.sleep(0.5)
+        else:
+            raise RuntimeError(f"东财{pool}池接口不可达 (date={d})")
+        try:
+            payload = r.json()
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"东财{pool}池响应解析失败: {e}") from e
+        data = payload.get("data") or {}
+        batch = data.get("pool") or []
+        rows.extend(batch)
+        total = int(data.get("tc") or 0)
+        if len(rows) >= total or not batch:
+            break
+        page += 1
+    return rows
+
+
+def _fmt_time(hhmmss) -> str | None:
+    """92500 → '09:25:00'"""
+    if hhmmss is None:
+        return None
+    try:
+        s = str(int(hhmmss)).zfill(6)
+        return f"{s[0:2]}:{s[2:4]}:{s[4:6]}"
+    except (ValueError, TypeError):
+        return None
+
+
+def _zt_rows(pool: str, date_str: str) -> list[dict]:
+    """拉取并整形单池: 东财字段 → 中文列 (与 ext 表字段对齐)。"""
+    raw = _fetch_zt_pool(pool, date_str)
+    rows: list[dict] = []
+    for it in raw:
+        zttj = it.get("zttj") or {}
+        mkt = it.get("m")
+        row = {
+            "股票代码": str(it.get("c") or ""),
+            "股票简称": str(it.get("n") or ""),
+            "交易所": ("SH" if mkt == 1 else "SZ") if mkt is not None else None,
+            "最新价": (it.get("p") or 0) / 1000.0,
+            "涨跌幅": it.get("zdp"),
+            "成交额": it.get("amount"),
+            "流通市值": it.get("ltsz"),
+            "总市值": it.get("tshare"),
+            "换手率": it.get("hs"),
+            "所属行业": it.get("hybk"),
+            "首次封板时间": _fmt_time(it.get("fbt")),
+            "最后封板时间": _fmt_time(it.get("lbt")),
+            "炸板次数": it.get("zbc"),
+            "封板资金": it.get("fund"),
+            "连板数": it.get("lbc"),
+            "涨停统计": (
+                f"{zttj.get('ct')}/{zttj.get('days')}"
+                if zttj else None
+            ),
+        }
+        if pool == "zb":  # 炸板池专有: 涨停价 / 振幅 / 涨速
+            row["涨停价"] = (it.get("ztp") or 0) / 1000.0
+            row["振幅"] = it.get("zf")
+            row["涨速"] = it.get("zs")
+        if pool == "dt":  # 跌停池专有
+            row["封单资金"] = it.get("fund")
+        rows.append(row)
+    return rows
+
+
+@app.get("/zt_pool")
+def zt_pool(
+    pool: str = "zt",
+    date: str | None = None,
+    refresh: bool = False,
+) -> dict:
+    """涨停板三池 (东方财富 push2ex)。
+
+    pool: zt=涨停池 / zb=炸板池 / dt=跌停池
+    date: YYYYMMDD, 缺省当日 (盘中为准)
+    输出行: 股票代码/简称/最新价/涨跌幅/换手率/封板资金/首次封板时间/
+            炸板次数/连板数/涨停统计/所属行业 等 (炸板池另有涨停价/振幅)。
+    当日缓存 5 分钟, 历史日期缓存 24 小时; refresh=true 强制绕过缓存。
+    """
+    pool = (pool or "zt").strip().lower()
+    if pool not in _ZT_POOLS:
+        return {"data": [], "error": "pool 必须为 zt / zb / dt"}
+    d = _zt_pool_date(date)
+    today = datetime.now().strftime("%Y%m%d")
+    is_today = d == today
+
+    key = (pool, d)
+    if not refresh:
+        with _ZT_LOCK:
+            st = _ZT_CACHE.get(key)
+            ttl = _ZT_TTL_INTRADAY if is_today else _ZT_TTL_HISTORY
+            if st and time.time() - st["last_ok"] < ttl:
+                return {"data": st["rows"], "date": d, "pool": pool}
+
+    try:
+        rows = _zt_rows(pool, d)
+    except RuntimeError as e:
+        with _ZT_LOCK:
+            stale = _ZT_CACHE.get(key)
+        if stale:  # 上游抖动时回退旧数据 (标 stale)
+            return {"data": stale["rows"], "date": d, "pool": pool, "stale": True}
+        return {"data": [], "error": str(e), "date": d, "pool": pool}
+
+    with _ZT_LOCK:
+        _ZT_CACHE[key] = {"rows": rows, "last_ok": time.time()}
+    log.info("zt_pool %s %s: %d rows", pool, d, len(rows))
+    return {"data": rows, "date": d, "pool": pool}
+
+
 @app.on_event("startup")
 def _start_full_rt_refresher() -> None:
     """FastAPI startup: 拉起全市场行情后台刷新线程 (90s 一轮)"""

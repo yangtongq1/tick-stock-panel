@@ -51,6 +51,15 @@ _PRESET_IDS = ("ext_gn_ths", "ext_hy_ths")
 # 播种标记: 出厂预设只在标记缺失 (首次安装/老库首次升级到播种机制) 时创建。
 _SEED_MARKER = ".builtin_presets_seeded"
 
+# 出厂批次标记: 播种机制上线后新增的内置表, 用独立批次标记送达到老库
+# (既不复活用户删过的旧表, 也让新批次表正常创建)。值为批次号, 逐批递增。
+# v2 = 2026-11-19 涨停板三池 (ext_zt_pool / ext_zb_pool / ext_dt_pool)。
+_SEED_BATCH_MARKER = ".builtin_presets_batch"
+_SEED_BATCH_VERSION = 2
+_SEED_BATCH_MEMBERS = {
+    2: ("ext_zt_pool", "ext_zb_pool", "ext_dt_pool"),
+}
+
 
 # ---------------------------------------------------------------------------
 # 预设定义: 字段结构 + 完整拉取配方
@@ -59,6 +68,11 @@ _SEED_MARKER = ".builtin_presets_seeded"
 def _aksource_boards_url(kind: str) -> str:
     """本地 aksource 板块聚合端点 (东方财富源, 免鉴权)。"""
     return f"http://127.0.0.1:3021/boards?kind={kind}"
+
+
+def _aksource_zt_url(pool: str) -> str:
+    """本地 aksource 涨停板三池端点 (东方财富 push2ex, 免鉴权)。"""
+    return f"http://127.0.0.1:3021/zt_pool?pool={pool}"
 
 
 _AKSOURCE_DESC = "板块成分 (东方财富 push2, 经本地 aksource 聚合; 拉取配方见「拉取」页)"
@@ -133,8 +147,74 @@ def _industry_preset() -> ExtConfig:
     )
 
 
+_ZT_FIELDS_COMMON = [
+    ("股票简称", "string", "股票简称"),
+    ("交易所", "string", "交易所"),
+    ("最新价", "number", "最新价"),
+    ("涨跌幅", "number", "涨跌幅 %"),
+    ("成交额", "number", "成交额 元"),
+    ("流通市值", "number", "流通市值 元"),
+    ("总市值", "number", "总市值 元"),
+    ("换手率", "number", "换手率 %"),
+    ("所属行业", "string", "所属行业"),
+    ("首次封板时间", "string", "首次封板时间"),
+    ("最后封板时间", "string", "最后封板时间"),
+    ("炸板次数", "number", "炸板次数"),
+    ("封板资金", "number", "封板资金 元"),
+    ("连板数", "number", "连板数"),
+    ("涨停统计", "string", "涨停统计 (次数/天数)"),
+]
+
+_ZT_POOLS_DEF = (
+    ("zt", "ext_zt_pool", "涨停股池", [("涨停价", "number", "涨停价")]),
+    ("zb", "ext_zb_pool", "炸板股池", [("涨停价", "number", "涨停价"), ("振幅", "number", "振幅 %"), ("涨速", "number", "涨速")]),
+    ("dt", "ext_dt_pool", "跌停股池", [("封单资金", "number", "封单资金 元")]),
+)
+
+
+def _zt_pool_preset(pool: str, config_id: str, label: str, extra_fields: list[tuple]) -> ExtConfig:
+    """涨停板三池预设 (东方财富 push2ex, 经本地 aksource 聚合)。
+
+    timeseries + date_param=compact: 每日分区, 支持历史回补
+    (东财服务端保留历史日期数据, backfill_history 可按本地交易日逐日补齐)。
+    盘中多盘: time_field=PLATE_TS_FIELD 注入拉取时刻, 同日多盘去重。
+    """
+    return ExtConfig(
+        id=config_id,
+        label=label,
+        mode="timeseries",
+        fields=[
+            ExtField("symbol", "string", "标的代码"),
+            ExtField("code", "string", "代码"),
+            ExtField("股票代码", "string", "股票代码"),
+            *[ExtField(*f) for f in _ZT_FIELDS_COMMON],
+            *[ExtField(*f) for f in extra_fields],
+        ],
+        description="涨停板池 (东方财富 push2ex, 经本地 aksource 聚合; 含连板数/封板资金/炸板次数)",
+        symbol_map={"type": "mapped", "col": "股票代码"},
+        code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
+        pull=PullConfig(
+            url=_aksource_zt_url(pool),
+            method="GET",
+            response_path="data",
+            field_map={},
+            auth={"type": "none"},
+            timeout_seconds=60,
+            schedule_minutes=30,
+            schedule_trading_only=True,
+            time_field="__pull_ts__",
+            date_param="date",
+            date_format="compact",
+            enabled=True,
+        ),
+    )
+
+
 def _presets() -> list[ExtConfig]:
-    return [_concept_preset(), _industry_preset()]
+    return [_concept_preset(), _industry_preset()] + [
+        _zt_pool_preset(pool, cid, label, extra)
+        for pool, cid, label, extra in _ZT_POOLS_DEF
+    ]
 
 
 def get_preset(config_id: str) -> ExtConfig | None:
@@ -207,14 +287,31 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
     store = ExtConfigStore(data_dir)
     marker = data_dir / "ext_data" / _SEED_MARKER
     first_install = not marker.exists()
+
+    # 批次播种: 老库 (已有 v1 标记) 升级到含新出厂表的版本时, 只创建
+    # 本批次新增的表 —— 用户此前删除过的 v1 表不会被复活 (不在批次成员里)。
+    batch_marker = data_dir / "ext_data" / _SEED_BATCH_MARKER
+    def _read_batch() -> int:
+        try:
+            return int((batch_marker.read_text(encoding="utf-8") or "0").strip() or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+    batch_now = _read_batch()
+    new_ids: set[str] = set()
+    if batch_now < _SEED_BATCH_VERSION:
+        for v in range(batch_now + 1, _SEED_BATCH_VERSION + 1):
+            new_ids.update(_SEED_BATCH_MEMBERS.get(v, ()))
+
     for config in _presets():
         try:
             existing = store.get(config.id)
             if existing is None:
-                if first_install:
+                # 全新安装 (任意批次表都创建) 或本批次新增表 → 创建;
+                # 老批次表在已播种库上缺失 = 用户删除过, 不复活。
+                if first_install or config.id in new_ids:
                     store.upsert(config)
                     logger.info("内置扩展表 %s 配置已就绪 (含出厂拉取配方)", config.id)
-                continue  # 已播种后缺失 = 用户删除过, 不复活
+                continue
 
             changed = False
             if _is_retired_factory_pull(config.id, existing.pull):
@@ -238,3 +335,10 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
             atomic_write_text(marker, "")
         except Exception as e:  # noqa: BLE001 — 启动契约: 标记失败不阻断
             logger.warning("内置预设播种标记写入失败 (下次启动会重试创建): %s", e)
+    if batch_now < _SEED_BATCH_VERSION:
+        # 批次标记在表创建后落地; 失败下次启动重试 (已创建的命中「已存在跳过」)
+        try:
+            batch_marker.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(batch_marker, str(_SEED_BATCH_VERSION))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("内置预设批次标记写入失败 (下次启动会重试): %s", e)
