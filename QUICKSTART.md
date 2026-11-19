@@ -38,6 +38,11 @@ Windows 也可直接**双击 `start.bat`**（等价于 `.\quick-start.ps1`，同
 
 就绪后浏览器自动打开 <http://localhost:3018>。
 
+**停止 / 清理（Windows）**：双击 `stop.bat` 停止全部 TSP 服务（后端 3018 / 数据源 3021 / dev 前端 3011）；
+`stop.bat clean` 进一步移除计划任务 `TSP-*` 并删除 `backend\.venv`（下次 start.bat 自动重建）。
+按命令行特征匹配进程，不影响机器上其他 Python 程序；`data/` 行情数据永不触碰。
+Linux/macOS：`pkill -f "uvicorn app.main:app"` / `pkill -f "server.py"`。
+
 **改了前端代码才需要重建**（此时才需要 Node 20+）：
 `./quick-start.sh rebuild`（Windows: `.\quick-start.ps1 -Rebuild`）。
 重建用的 pnpm 优先走官方独立安装器（get.pnpm.io），不依赖 npm——避免 npm 组件损坏的机器卡死。
