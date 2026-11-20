@@ -115,20 +115,10 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDi
 #     (HTTPS_PROXY+https_proxy 并存, 装代理的 Windows 常见)
 #     抛 "已添加项" 字典键冲突 → 后端静默不启动的坑
 
-# 免费数据源 aksource (腾讯/新浪/东财聚合; 复用 backend venv)
-if (Test-Http "http://127.0.0.1:3021/") {
-  Write-Host "[tsp] 数据源 3021 已在运行"
-} else {
-  Write-Host "[tsp] 启动免费数据源 3021 ..."
-  Push-Location "$Root\aksource"
-  cmd /c "start /min `"aksource`" cmd /c `"`"$py`" server.py >> `"$logDir\aksource.log`" 2>&1`"" | Out-Null
-  Pop-Location
-  # 等数据源起来 (instruments 加载 ~5s); 后端启动时它会去 3021 拉板块/涨停池
-  foreach ($i in 1..15) {
-    if (Test-Http "http://127.0.0.1:3021/") { break }
-    Start-Sleep -Seconds 1
-  }
-}
+# 顺序: 先后端 3018, 再数据源 3021。
+#   - 后端启动不依赖 3021: 启动时拉不到只是 WARNING, PullScheduler 会按配置
+#     间隔自动重试 (实测 3021 慢半分钟也无影响);
+#   - 先起后端让页面尽早可用; aksource 随后起来, 后端下一轮拉取即拿到数据。
 
 # 后端 3018: host 0.0.0.0 局域网可访问; 已挂载 frontend/dist → 一个地址同时出页面与 API
 if (Test-Http "http://127.0.0.1:3018/api/capabilities") {
@@ -138,6 +128,16 @@ if (Test-Http "http://127.0.0.1:3018/api/capabilities") {
   $envf = "$Root\.env"
   Push-Location "$Root\backend"
   cmd /c "start /min `"tsp-backend`" cmd /c `"`"$py`" -m uvicorn app.main:app --env-file `"$envf`" --host 0.0.0.0 --port 3018 >> `"$logDir\backend.log`" 2>&1`"" | Out-Null
+  Pop-Location
+}
+
+# 免费数据源 aksource (腾讯/新浪/东财聚合; 复用 backend venv)
+if (Test-Http "http://127.0.0.1:3021/") {
+  Write-Host "[tsp] 数据源 3021 已在运行"
+} else {
+  Write-Host "[tsp] 启动免费数据源 3021 ..."
+  Push-Location "$Root\aksource"
+  cmd /c "start /min `"aksource`" cmd /c `"`"$py`" server.py >> `"$logDir\aksource.log`" 2>&1`"" | Out-Null
   Pop-Location
 }
 
