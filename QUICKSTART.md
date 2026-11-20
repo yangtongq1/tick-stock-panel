@@ -1,14 +1,15 @@
 # 一键部署（Windows / Linux / macOS）
 
 > `git clone` 后**一条命令**，浏览器打开 <http://localhost:3018> 即是完整系统。
-> 运行只需 Python 3.11+（免 Docker、免数据库、免 API Key、**无需 Node**——前端构建产物随仓库分发）。
-> 已在 Windows 10 + Python 3.13 实测通过。
+> **零前置依赖**（免 Python 安装、免 Docker、免数据库、免 API Key、无需 Node——前端构建产物随仓库分发）：
+> Windows 双击 `start.bat` 即可，uv 与 Python 3.12 由脚本自动安装/下载。
 
-## clone 即得完整行情 + 前端
+## clone 即得完整行情 + 前端 + 扩展数据
 
-**仓库自带两类开箱即用内容**：
+**仓库自带三类开箱即用内容**：
 1. **全量历史行情**（约 140MB Parquet）：日K、增强日K、指数日K、分钟K、财务四表、除权因子、instruments 维表——clone 完成即拥有与作者机器一模一样的行情，无需等首次拉取
 2. **前端构建产物**（`frontend/dist`，约 7MB）：后端直接伺服，无需 Node/npm/pnpm 即可运行
+3. **扩展数据首拉快照 + 模拟盘**（`data/ext_data`、`data/paper`）：涨停/炸板/跌停三池、个股/板块资金流、概念/行业板块、模拟盘账户持仓——首启即有数据可看，此后盘中/每日自动增量
 
 之后各机器独立增量：盘后管道（工作日 15:35 自动，或手动触发）从免费源拉当日新
 分区追加，与仓库历史分区互不干扰（按日分区只追加不覆盖，多机各自增量无冲突）。
@@ -24,19 +25,19 @@ cd tick-stock-panel
 ./quick-start.sh          # Windows PowerShell: .\quick-start.ps1
 ```
 
-Windows 也可直接**双击 `start.bat`**（等价于 `.\quick-start.ps1`，同样支持 `-Rebuild` 参数）。
+Windows 直接**双击 `start.bat`** 即可（等价于 `.\quick-start.ps1`，同样支持 `-Rebuild` 参数）。
 
-脚本幂等，自动完成五步（已装/已建自动跳过，日常启动秒过）：
+脚本幂等，自动完成六步（已装/已建自动跳过，日常启动秒过）：
 
-1. 检查/安装依赖（Python 3.11+、uv）——**无需 Node**
+1. 安装 uv（winget 缺失时自动回退官方独立安装器），并由 uv 自动下载**托管 Python 3.12**——系统无需装过 Python
 2. 创建 `.env`
-3. 后端依赖 `uv sync`
-4. 前端：使用仓库自带的 `frontend/dist` 构建产物（跳过）
-5. 启动三件套并自动打开浏览器：
+3. 后端依赖 `uv sync`（按 `backend/uv.lock` 锁定版本精确复现）
+4. 前端：使用仓库自带的 `frontend/dist` 构建产物（跳过，无需 Node）
+5. 启动两件套并等待就绪（就绪自检 + 扩展表数量检查 + 自动打开浏览器）：
    - **后端 3018**（直接伺服前端页面，页面+API 同一地址）
-   - 免费数据源 aksource 3021（实时/分钟/板块/财务）
+   - 免费数据源 aksource 3021（实时/分钟/板块/财务/涨停池）
 
-就绪后浏览器自动打开 <http://localhost:3018>。
+后端启动时自动播种扩展表（涨停/炸板/跌停池、个股/板块资金流、概念、行业）并盘中定时拉取——连板梯队、概念行业在新机器上全自动同步。
 
 **停止 / 清理（Windows）**：双击 `stop.bat` 停止全部 TSP 服务（后端 3018 / 数据源 3021 / dev 前端 3011）；
 `stop.bat clean` 进一步移除计划任务 `TSP-*` 并删除 `backend\.venv`（下次 start.bat 自动重建）。
@@ -63,7 +64,7 @@ cd backend && ./.venv/bin/python -m uvicorn app.main:app \
 |---|---|
 | 首次打开强制 5 步向导 | 正常流程点完即可；卡住可 `curl -X POST http://127.0.0.1:3018/api/settings/onboarding/complete` 跳过 |
 | 打开 3018 是 404 | `frontend/dist` 缺失（极少数情况）；带 Node 的机器跑 `.\quick-start.ps1 -Rebuild` 重建 |
-| 后端 90s 未就绪 | 看 `data/logs/backend.err.log`（Windows）/ `data/logs/backend.log`（Linux/macOS） |
+| 后端 120s 未就绪 | 看 `data/logs/backend.log`（含完整启动日志；后端启动需数据预热 30-90s） |
 | uv 装完找不到命令 | 装到 `~/.local/bin`，新终端或手动加 PATH |
 | `npm i -g pnpm` 报 MODULE_NOT_FOUND | 该机 npm 组件损坏；用官方独立安装器：Windows `iwr https://get.pnpm.io/install.ps1 -UseBasicParsing \| iex`，Linux/macOS `curl -fsSL https://get.pnpm.io/install.sh \| sh -` |
 | 实时行情/分钟K/财务/板块为空 | 确认免费数据源 aksource 在跑：`curl http://127.0.0.1:3021/boards?kind=concept`；没起就重跑 quick-start 脚本（见 `aksource/README.md`）。**无需任何 API Key** |
