@@ -1,5 +1,7 @@
-# TSP 三服务启动脚本（aksource 3021 + 后端 3018 + 前端 3011, 独立进程, 不随终端退出）
+# TSP 三服务启动脚本（aksource 3021 + 后端 3018, 独立进程, 不随终端退出）
 # 用途: 开机自启 / 手动双击启动; 路径自适应 (git clone 到任意目录均可)
+# 后端 3018 已挂载 frontend/dist 构建产物 → 一个地址同时出页面与 API,
+# 不再需要独立的 3011 前端 dev server (需 Node 且与 3018 页面重复)。
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
@@ -23,32 +25,24 @@ if ($aksRunning) {
 
 # ---- 后端 3018 ----
 # host 0.0.0.0: 局域网可访问 (10.2.207.117 QUANT TERMINAL 对接 TSP API)
+# 启动方式与上方 aksource 一致 (cmd /c start 派生分离进程): Start-Process 的
+# -RedirectStandard* 在大小写重复代理环境变量 (HTTPS_PROXY+https_proxy 并存,
+# 装代理的 Windows 常见) 下抛 "已添加项" 字典键冲突 → 后端静默不启动。
 $backendRunning = Get-NetTCPConnection -State Listen -LocalPort 3018 -ErrorAction SilentlyContinue
 if ($backendRunning) {
   Write-Host "[tsp] 后端 3018 已在运行"
 } else {
   Write-Host "[tsp] 启动后端 3018 ..."
-  Start-Process -WindowStyle Hidden -FilePath "$Root\backend\.venv\Scripts\python.exe" `
-    -ArgumentList '-m','uvicorn','app.main:app','--env-file',"$Root\.env",'--host','0.0.0.0','--port','3018' `
-    -WorkingDirectory "$Root\backend" `
-    -RedirectStandardOutput "$logDir\backend.log" -RedirectStandardError "$logDir\backend.err.log"
-}
-
-# ---- 前端 3011 ----
-$frontendRunning = Get-NetTCPConnection -State Listen -LocalPort 3011 -ErrorAction SilentlyContinue
-if ($frontendRunning) {
-  Write-Host "[tsp] 前端 3011 已在运行"
-} else {
-  Write-Host "[tsp] 启动前端 3011 ..."
-  Start-Process -WindowStyle Hidden -FilePath 'powershell.exe' `
-    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',
-      "Set-Location '$Root\frontend'; npx pnpm dev 2>&1 | Out-File -Append '$logDir\frontend.log'" `
-    -WorkingDirectory "$Root\frontend"
+  $py = "$Root\backend\.venv\Scripts\python.exe"
+  $envf = "$Root\.env"
+  Push-Location "$Root\backend"
+  cmd /c "start /min `"tsp-backend`" cmd /c `"`"$py`" -m uvicorn app.main:app --env-file `"$envf`" --host 0.0.0.0 --port 3018 >> `"$logDir\backend.log`" 2>&1`"" | Out-Null
+  Pop-Location
 }
 
 Write-Host ""
 Write-Host "======================================" -ForegroundColor Green
-Write-Host " 前端  http://localhost:3011  (主入口)"
-Write-Host " 后端  http://localhost:3018  (API)"
-Write-Host " 数据源 http://localhost:3021  (免费源)"
+Write-Host " 系统入口  http://localhost:3018  (页面+API)"
+Write-Host " 数据源    http://localhost:3021  (免费源)"
+Write-Host " 局域网    本机 IP:3018"
 Write-Host "======================================" -ForegroundColor Green
