@@ -1366,5 +1366,9 @@ def _start_full_rt_refresher() -> None:
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=3021, log_level="info")
+    # 默认只监听本机 (安全); 服务器部署需要公网访问时设 AKSOURCE_HOST=0.0.0.0
+    host = os.environ.get("AKSOURCE_HOST", "127.0.0.1")
+    port = int(os.environ.get("AKSOURCE_PORT", "3021"))
+    uvicorn.run(app, host=host, port=port, log_level="info")
