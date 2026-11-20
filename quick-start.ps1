@@ -46,7 +46,14 @@ $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 # 不要求用户系统装过 Python —— 新机器零依赖起步。
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host "安装 uv (Python 依赖管理器)..."
-  Invoke-Native winget @('install', '--id=astral-sh.uv', '--accept-source-agreements', '--accept-package-agreements', '--silent')
+  # 首选 winget; LTSC/精简版 Windows 可能没有 winget → 回退官方独立安装器
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    Invoke-Native winget @('install', '--id=astral-sh.uv', '--accept-source-agreements', '--accept-package-agreements', '--silent')
+  } else {
+    Write-Host "winget 不可用, 用官方独立安装器..."
+    Invoke-Native powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "Invoke-WebRequest -Uri https://astral.sh/uv/install.ps1 -UseBasicParsing | Invoke-Expression")
+  }
   $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
   if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { throw "uv 安装后不可用, 请新开终端重跑 start.bat" }
 }
