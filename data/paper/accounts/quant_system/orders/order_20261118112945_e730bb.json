@@ -1,0 +1,17 @@
+{
+  "id": "order_20261118112945_e730bb",
+  "symbol": "600567.SH",
+  "asset_type": "stock",
+  "side": "sell",
+  "qty": 1400,
+  "order_type": "next_open",
+  "status": "pending",
+  "ref_price": 0.85,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-18T11:29:45.771602+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": null
+}

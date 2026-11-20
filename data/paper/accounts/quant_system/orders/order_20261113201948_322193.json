@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201948_322193",
+  "symbol": "600076.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 800,
+  "order_type": "market",
+  "status": "filled",
+  "ref_price": 2.16,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:48.766347+08:00",
+  "filled_at": "2026-11-17T09:30:08.052920+08:00",
+  "fill_price": 2.041,
+  "fees": 5.0,
+  "reason": null
+}

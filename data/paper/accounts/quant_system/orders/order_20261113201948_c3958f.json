@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201948_c3958f",
+  "symbol": "002986.SZ",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 100,
+  "order_type": "market",
+  "status": "filled",
+  "ref_price": 9.96,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:48.230710+08:00",
+  "filled_at": "2026-11-17T09:30:07.642916+08:00",
+  "fill_price": 9.6148,
+  "fees": 5.0,
+  "reason": null
+}

@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201945_cf4b5c",
+  "symbol": "000504.SZ",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 500,
+  "order_type": "market",
+  "status": "filled",
+  "ref_price": 8.37,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:45.774021+08:00",
+  "filled_at": "2026-11-17T09:30:04.865457+08:00",
+  "fill_price": 7.5338,
+  "fees": 5.0,
+  "reason": null
+}

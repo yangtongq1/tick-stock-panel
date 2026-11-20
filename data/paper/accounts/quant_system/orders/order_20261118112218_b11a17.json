@@ -1,0 +1,17 @@
+{
+  "id": "order_20261118112218_b11a17",
+  "symbol": "000504.SZ",
+  "asset_type": "stock",
+  "side": "sell",
+  "qty": 500,
+  "order_type": "next_open",
+  "status": "filled",
+  "ref_price": 7.35,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-18T11:22:18.872940+08:00",
+  "filled_at": "2026-11-19T19:16:57.614987+08:00",
+  "fill_price": 7.2864,
+  "fees": 8.64,
+  "reason": null
+}

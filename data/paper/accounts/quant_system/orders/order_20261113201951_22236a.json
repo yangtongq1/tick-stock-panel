@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201951_22236a",
+  "symbol": "603950.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 4600,
+  "order_type": "market",
+  "status": "expired",
+  "ref_price": 34.28,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:51.425495+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "资金被更早的待成交买入单占用 (约 854719, 可用 989435)"
+}

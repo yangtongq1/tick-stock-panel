@@ -1,0 +1,17 @@
+{
+  "id": "order_20261117093443_56f874",
+  "symbol": "601988.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 13600,
+  "order_type": "next_open",
+  "status": "filled",
+  "ref_price": 7.33,
+  "postponed": 0,
+  "source": "auto:arule_20261113195221_6bc504",
+  "created_at": "2026-11-17T09:34:43.138463+08:00",
+  "filled_at": "2026-11-19T19:16:55.737683+08:00",
+  "fill_price": 7.3537,
+  "fees": 25.0,
+  "reason": null
+}

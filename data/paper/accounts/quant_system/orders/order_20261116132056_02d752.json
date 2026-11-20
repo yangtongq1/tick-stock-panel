@@ -1,0 +1,17 @@
+{
+  "id": "order_20261116132056_02d752",
+  "symbol": "605068.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 300,
+  "order_type": "next_open",
+  "status": "cancelled",
+  "ref_price": 18.28,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-16T13:20:56.008707+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "manual cancel"
+}

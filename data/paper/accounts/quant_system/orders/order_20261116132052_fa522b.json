@@ -1,0 +1,17 @@
+{
+  "id": "order_20261116132052_fa522b",
+  "symbol": "601168.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 100,
+  "order_type": "next_open",
+  "status": "cancelled",
+  "ref_price": 26.44,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-16T13:20:52.920453+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "manual cancel"
+}

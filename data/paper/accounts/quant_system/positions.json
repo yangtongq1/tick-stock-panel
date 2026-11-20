@@ -1,0 +1,670 @@
+{
+  "updated_at": "2026-11-19T19:17:01.270596+08:00",
+  "positions": {
+    "603196.SH": {
+      "asset_type": "stock",
+      "qty": 300,
+      "avg_cost": 14.2271,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 200
+        }
+      ]
+    },
+    "603399.SH": {
+      "asset_type": "stock",
+      "qty": 500,
+      "avg_cost": 9.983333,
+      "available_qty": 500,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 500
+        }
+      ]
+    },
+    "603826.SH": {
+      "asset_type": "stock",
+      "qty": 500,
+      "avg_cost": 11.84592,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 400
+        }
+      ]
+    },
+    "603887.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 7.5337,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        }
+      ]
+    },
+    "603890.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 11.4457,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        }
+      ]
+    },
+    "603969.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 5.6728,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        }
+      ]
+    },
+    "603993.SH": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 12.18105,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "605266.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 13.3466,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        }
+      ]
+    },
+    "605289.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 54.107,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 100
+        }
+      ]
+    },
+    "605376.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "605068.SH": {
+      "asset_type": "stock",
+      "qty": 300,
+      "avg_cost": 18.335867,
+      "available_qty": 300,
+      "lots": [
+        {
+          "date": "2026-11-16",
+          "qty": 300
+        }
+      ]
+    },
+    "000042.SZ": {
+      "asset_type": "stock",
+      "qty": 400,
+      "avg_cost": 6.2806,
+      "available_qty": 300,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 300
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "000155.SZ": {
+      "asset_type": "stock",
+      "qty": 1200,
+      "avg_cost": 8.582633,
+      "available_qty": 600,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 600
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 600
+        }
+      ]
+    },
+    "000504.SZ": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "000567.SZ": {
+      "asset_type": "stock",
+      "qty": 1400,
+      "avg_cost": 4.1921,
+      "available_qty": 600,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 600
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 800
+        }
+      ]
+    },
+    "000711.SZ": {
+      "asset_type": "stock",
+      "qty": 1800,
+      "avg_cost": 3.386156,
+      "available_qty": 800,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 800
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 1000
+        }
+      ]
+    },
+    "000737.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 9.5648,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "000960.SZ": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 20.97045,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "000967.SZ": {
+      "asset_type": "stock",
+      "qty": 500,
+      "avg_cost": 5.91898,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 400
+        }
+      ]
+    },
+    "001230.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 14.6673,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "001267.SZ": {
+      "asset_type": "stock",
+      "qty": 6700,
+      "avg_cost": 20.095023,
+      "available_qty": 6700,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 6700
+        }
+      ]
+    },
+    "002066.SZ": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 12.5012,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "002135.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 4.3922,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002240.SZ": {
+      "asset_type": "stock",
+      "qty": 300,
+      "avg_cost": 17.872233,
+      "available_qty": 200,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 200
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "002289.SZ": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 30.6653,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "002348.SZ": {
+      "asset_type": "stock",
+      "qty": 400,
+      "avg_cost": 6.93345,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 300
+        }
+      ]
+    },
+    "002488.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 6.7934,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002647.SZ": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 6.8484,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "002730.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 14.6273,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002805.SZ": {
+      "asset_type": "stock",
+      "qty": 500,
+      "avg_cost": 13.8169,
+      "available_qty": 500,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 500
+        }
+      ]
+    },
+    "002842.SZ": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 21.72585,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "002921.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 15.7178,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002938.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 43.0715,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002986.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 9.6648,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "002993.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 25.5627,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "003036.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 26.7433,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "600076.SH": {
+      "asset_type": "stock",
+      "qty": 1400,
+      "avg_cost": 1.996714,
+      "available_qty": 800,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 800
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 600
+        }
+      ]
+    },
+    "600478.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "600567.SH": {
+      "asset_type": "stock",
+      "qty": 1400,
+      "avg_cost": 0.903971,
+      "available_qty": 1400,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 1400
+        }
+      ]
+    },
+    "600683.SH": {
+      "asset_type": "stock",
+      "qty": 1000,
+      "avg_cost": 7.0585,
+      "available_qty": 500,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 500
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 500
+        }
+      ]
+    },
+    "600692.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 5.5753,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "601133.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 15.7879,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "601138.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "601168.SH": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 24.7023,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "603045.SH": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 30.4277,
+      "available_qty": 200,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 200
+        }
+      ]
+    },
+    "603115.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "603150.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "603220.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 14.097,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "603316.SH": {
+      "asset_type": "stock",
+      "qty": 200,
+      "avg_cost": 10.13005,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        },
+        {
+          "date": "2026-11-19",
+          "qty": 100
+        }
+      ]
+    },
+    "603578.SH": {
+      "asset_type": "stock",
+      "qty": 0,
+      "avg_cost": 0.0,
+      "available_qty": 0,
+      "lots": []
+    },
+    "603256.SH": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 65.6328,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    },
+    "001389.SZ": {
+      "asset_type": "stock",
+      "qty": 100,
+      "avg_cost": 82.8914,
+      "available_qty": 100,
+      "lots": [
+        {
+          "date": "2026-11-17",
+          "qty": 100
+        }
+      ]
+    }
+  }
+}

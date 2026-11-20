@@ -87,14 +87,18 @@ if (Test-Http "http://127.0.0.1:3021/") {
 
 # 后端 3018: host 0.0.0.0 局域网可访问 (QUANT TERMINAL 等对接);
 # 已挂载 frontend/dist → 一个地址同时出页面与 API
+# 启动方式: cmd /c start 派生分离进程 (与上方 aksource 一致)。
+# 不用 Start-Process: 它在大小写重复的代理环境变量下
+# (HTTPS_PROXY+https_proxy 同时存在, 常见于装了代理的 Windows) 会抛
+# "已添加项" 字典键冲突异常 → 后端静默不启动, 页面空转无 API。
 if (Test-Http "http://127.0.0.1:3018/api/capabilities") {
   Write-Host "[tsp] 后端 3018 已在运行"
 } else {
   Write-Host "[tsp] 启动后端 3018 ..."
-  Start-Process -WindowStyle Hidden -FilePath "$Root\backend\.venv\Scripts\python.exe" `
-    -ArgumentList '-m','uvicorn','app.main:app','--env-file',"$Root\.env",'--host','0.0.0.0','--port','3018' `
-    -WorkingDirectory "$Root\backend" `
-    -RedirectStandardOutput "$logDir\backend.log" -RedirectStandardError "$logDir\backend.err.log"
+  $py = "$Root\backend\.venv\Scripts\python.exe"
+  $envf = "$Root\.env"
+  cmd /c "start /min `"tsp-backend`" cmd /c `"`"$py`" -m uvicorn app.main:app --env-file `"$envf`" --host 0.0.0.0 --port 3018 >> `"$logDir\backend.log`" 2>&1`"" | Out-Null
+  Start-Sleep -Seconds 2
 }
 
 # 等后端就绪 (首次启动要做数据预热, 最多 90s)

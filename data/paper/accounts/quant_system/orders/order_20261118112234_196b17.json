@@ -1,0 +1,17 @@
+{
+  "id": "order_20261118112234_196b17",
+  "symbol": "601168.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 100,
+  "order_type": "next_open",
+  "status": "filled",
+  "ref_price": 25.57,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-18T11:22:34.923660+08:00",
+  "filled_at": "2026-11-19T19:16:59.747894+08:00",
+  "fill_price": 23.8919,
+  "fees": 5.0,
+  "reason": null
+}

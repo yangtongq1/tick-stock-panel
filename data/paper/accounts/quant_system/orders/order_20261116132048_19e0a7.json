@@ -1,0 +1,17 @@
+{
+  "id": "order_20261116132048_19e0a7",
+  "symbol": "002796.SZ",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 200,
+  "order_type": "next_open",
+  "status": "cancelled",
+  "ref_price": 19.02,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-16T13:20:48.959691+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "manual cancel"
+}

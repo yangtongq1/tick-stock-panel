@@ -1,0 +1,125 @@
+{
+  "updated_at": "2026-11-19T19:16:56.656164+08:00",
+  "positions": {
+    "601766.SH": {
+      "asset_type": "stock",
+      "qty": 15000,
+      "avg_cost": 6.735083,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 15000
+        }
+      ]
+    },
+    "601988.SH": {
+      "asset_type": "stock",
+      "qty": 13600,
+      "avg_cost": 7.355538,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 13600
+        }
+      ]
+    },
+    "600132.SH": {
+      "asset_type": "stock",
+      "qty": 2500,
+      "avg_cost": 39.92988,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 2500
+        }
+      ]
+    },
+    "600936.SH": {
+      "asset_type": "stock",
+      "qty": 22600,
+      "avg_cost": 4.033008,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 22600
+        }
+      ]
+    },
+    "600941.SH": {
+      "asset_type": "stock",
+      "qty": 900,
+      "avg_cost": 107.430556,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 900
+        }
+      ]
+    },
+    "603195.SH": {
+      "asset_type": "stock",
+      "qty": 2500,
+      "avg_cost": 39.879868,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 2500
+        }
+      ]
+    },
+    "600750.SH": {
+      "asset_type": "stock",
+      "qty": 4200,
+      "avg_cost": 23.887871,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 4200
+        }
+      ]
+    },
+    "601298.SH": {
+      "asset_type": "stock",
+      "qty": 10000,
+      "avg_cost": 10.007501,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 10000
+        }
+      ]
+    },
+    "600128.SH": {
+      "asset_type": "stock",
+      "qty": 12000,
+      "avg_cost": 8.136133,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 12000
+        }
+      ]
+    },
+    "920489.BJ": {
+      "asset_type": "stock",
+      "qty": 8500,
+      "avg_cost": 11.138384,
+      "available_qty": 0,
+      "lots": [
+        {
+          "date": "2026-11-19",
+          "qty": 8500
+        }
+      ]
+    }
+  }
+}

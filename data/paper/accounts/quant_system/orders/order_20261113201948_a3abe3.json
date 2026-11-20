@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201948_a3abe3",
+  "symbol": "518880.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 31400,
+  "order_type": "market",
+  "status": "pending",
+  "ref_price": 8.68,
+  "postponed": 3,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:48.660930+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": null
+}

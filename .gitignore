@@ -50,10 +50,11 @@ backend/data/**
 # data/ 策略 (2026-11-18): 行情核心数据随 git 分发 —— clone 即得与作者机器
 # 一模一样的行情, 各机器此后每日自动增量 (aksource 免费源), 历史分区按日
 # 划分只追加不覆盖, 多机不会冲突。
-# 入库: 日K/富集/指数/分钟 K, 财务四表, 除权因子, instruments 维表, 数据源配置。
-# 不入库: 用户私有 (user_data 含 secrets/API Key/自选/批次), 模拟盘账户 (paper),
-#        运行时状态 (logs/job_store/backtest_runs/ai_cache/告警流/回测结果),
-#        ext_data 板块快照 (每日拉取即得, 免维护 git 体积)。
+# 入库: 日K/富集/指数/分钟 K, 财务四表, 除权因子, instruments 维表, 数据源配置,
+#      ext_data 扩展数据快照 (概念/行业/涨停三池等, 首启即有数据),
+#      paper 模拟盘 (账户/持仓/成交, 2026-11-20 起随库平移)。
+# 不入库: 用户私有 (user_data 含 secrets/API Key/自选/批次),
+#        运行时状态 (logs/job_store/backtest_runs/ai_cache/告警流/回测结果)。
 data/**
 !data/.gitkeep
 !data/data_sources/
@@ -76,6 +77,14 @@ data/**
 !data/instruments_etf/**
 !data/instruments_index/
 !data/instruments_index/**
+!data/ext_data/
+!data/ext_data/**
+!data/paper/
+!data/paper/**
+# ext_data 播种标记是本机运行时状态 (标记过 = 本机已完成播种); 入库会让
+# 新机器误判「已播种」而跳过创建三池/资金流等出厂表 → 排除
+data/ext_data/.builtin_presets_seeded
+data/ext_data/.builtin_presets_batch
 
 # ===== Secrets =====
 .env

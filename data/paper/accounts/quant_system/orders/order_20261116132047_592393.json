@@ -1,0 +1,17 @@
+{
+  "id": "order_20261116132047_592393",
+  "symbol": "002289.SZ",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 100,
+  "order_type": "next_open",
+  "status": "cancelled",
+  "ref_price": 30.47,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-16T13:20:47.954943+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "manual cancel"
+}

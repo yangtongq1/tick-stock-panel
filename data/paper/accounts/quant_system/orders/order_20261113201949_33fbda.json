@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201949_33fbda",
+  "symbol": "601133.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 100,
+  "order_type": "market",
+  "status": "filled",
+  "ref_price": 16.99,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:49.582251+08:00",
+  "filled_at": "2026-11-17T09:30:08.724133+08:00",
+  "fill_price": 15.7379,
+  "fees": 5.0,
+  "reason": null
+}

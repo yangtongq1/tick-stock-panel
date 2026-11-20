@@ -1,0 +1,17 @@
+{
+  "id": "order_20261113201949_7a38c0",
+  "symbol": "603045.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 400,
+  "order_type": "market",
+  "status": "filled",
+  "ref_price": 33.96,
+  "postponed": 1,
+  "source": "manual",
+  "created_at": "2026-11-13T20:19:49.889854+08:00",
+  "filled_at": "2026-11-17T09:30:09.123170+08:00",
+  "fill_price": 30.4152,
+  "fees": 5.0,
+  "reason": null
+}

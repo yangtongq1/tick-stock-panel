@@ -1,0 +1,17 @@
+{
+  "id": "order_20261118112235_ebe969",
+  "symbol": "603115.SH",
+  "asset_type": "stock",
+  "side": "sell",
+  "qty": 100,
+  "order_type": "next_open",
+  "status": "filled",
+  "ref_price": 37.03,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-18T11:22:35.924916+08:00",
+  "filled_at": "2026-11-19T19:17:00.019899+08:00",
+  "fill_price": 37.1414,
+  "fees": 8.71,
+  "reason": null
+}

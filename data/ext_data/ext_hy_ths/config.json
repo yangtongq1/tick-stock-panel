@@ -1,0 +1,84 @@
+{
+  "id": "ext_hy_ths",
+  "label": "扩展行业",
+  "mode": "snapshot",
+  "fields": [
+    {
+      "name": "symbol",
+      "dtype": "string",
+      "label": "标的代码"
+    },
+    {
+      "name": "code",
+      "dtype": "string",
+      "label": "代码"
+    },
+    {
+      "name": "股票代码",
+      "dtype": "string",
+      "label": "股票代码"
+    },
+    {
+      "name": "股票简称",
+      "dtype": "string",
+      "label": "股票简称"
+    },
+    {
+      "name": "所属同花顺行业",
+      "dtype": "string",
+      "label": "所属同花顺行业"
+    }
+  ],
+  "description": "板块成分 (东方财富 push2, 经本地 aksource 聚合; 拉取配方见「拉取」页)",
+  "symbol_map": {
+    "type": "mapped",
+    "col": "股票代码"
+  },
+  "code_map": {
+    "type": "computed",
+    "from": "symbol",
+    "method": "strip_exchange"
+  },
+  "market_level": false,
+  "created_at": "2026-11-13T18:28:47.459013",
+  "updated_at": "2026-11-19T14:00:29.675555",
+  "pull": {
+    "url": "http://127.0.0.1:3021/boards?kind=industry",
+    "method": "GET",
+    "headers": {},
+    "body": null,
+    "response_path": "data",
+    "field_map": {
+      "board_list": "所属同花顺行业"
+    },
+    "schedule_minutes": 1440,
+    "schedule_seconds": null,
+    "enabled": true,
+    "last_run": "2026-11-19T06:00:29.618556+00:00",
+    "last_status": "error",
+    "last_message": "Server error '500 Internal Server Error' for url 'http://127.0.0.1:3021/boards?kind=industry'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+    "last_rows": 5661,
+    "next_run": "2026-11-20T06:00:29.659554+00:00",
+    "time_window_start": null,
+    "time_window_end": null,
+    "date_param": null,
+    "date_format": "iso",
+    "time_field": null,
+    "since_param": null,
+    "granularity": "auto",
+    "auth": {
+      "type": "none"
+    },
+    "timeout_seconds": 180,
+    "page_param": null,
+    "page_size_param": null,
+    "page_size": 0,
+    "page_start": 1,
+    "max_pages": 20,
+    "fanout": null,
+    "schedule_time": null,
+    "schedule_period": "daily",
+    "schedule_day": 1,
+    "schedule_trading_only": false
+  }
+}

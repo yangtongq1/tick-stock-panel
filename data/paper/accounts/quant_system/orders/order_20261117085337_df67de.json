@@ -1,0 +1,17 @@
+{
+  "id": "order_20261117085337_df67de",
+  "symbol": "603007.SH",
+  "asset_type": "stock",
+  "side": "buy",
+  "qty": 1100,
+  "order_type": "next_open",
+  "status": "cancelled",
+  "ref_price": 4.19,
+  "postponed": 0,
+  "source": "manual",
+  "created_at": "2026-11-17T08:53:37.489505+08:00",
+  "filled_at": null,
+  "fill_price": null,
+  "fees": null,
+  "reason": "manual cancel"
+}
