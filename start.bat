@@ -21,7 +21,8 @@ set "EC=%ERRORLEVEL%"
 if not "%EC%"=="0" (
   echo.
   echo [tsp] Startup failed with exit code %EC%. Check output above.
-  echo [tsp] Common causes: missing Python/Node, proxy interference.
+  echo [tsp] Logs: data\logs\backend.log and data\logs\aksource.log
+  echo [tsp] Retry: just double-click start.bat again (idempotent).
   pause
 )
 endlocal & exit /b %EC%
