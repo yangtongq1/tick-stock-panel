@@ -24,6 +24,7 @@ from app.config import settings
 from app.indicators.pipeline import filter_halt_days, run_pipeline
 from app.market_time import cn_today
 from app.services import index_sync, instrument_sync, kline_sync
+from app.services import preferences
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import get_pool
@@ -130,6 +131,99 @@ class PipelineStageError(RuntimeError):
 
 def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
     pass
+
+
+# ================================================================
+# 盘后管道兜底轮询 (catch-up watchdog)
+# ================================================================
+# 动机: 15:35 cron 是「到点触发」, 电脑 15:35 关机/服务未起 → 当日数据永久缺失,
+# 要等 boot_integrity_check 在下次启动时救 (依赖 fuyao 日历 + 修复窗口)。
+# 这里改成轮询语义: 服务活着就每 15 分钟查一次「今天该跑的管道跑了没」,
+# 没跑就补跑 —— 关机错过 15:35 的, 开机后 15 分钟内自动补上。
+_CATCHUP_INTERVAL_MIN = 15   # 轮询间隔
+_CATCHUP_GRACE_MIN = 30      # 管道时刻后多少分钟才算「确实没跑」(避开与 cron 正常触发的竞态)
+
+
+def _is_trading_day_cn(d) -> bool:
+    """A 股交易日判断: fuyao 日历优先, 取不到回退周一~周五近似。"""
+    from app.services.data_integrity import _trading_calendar
+
+    cal = _trading_calendar()
+    if cal is not None:
+        return d in cal
+    return d.weekday() < 5
+
+
+def _daily_partition_exists(repo: KlineRepository, day) -> bool:
+    """当日日K分区是否存在且非空 (管道核心产出 = data/kline_daily/date=.../part.parquet)。"""
+    part = Path(repo.store.data_dir) / "kline_daily" / f"date={day.isoformat()}" / "part.parquet"
+    return part.exists() and part.stat().st_size > 0
+
+
+def _pipeline_due_and_missing(repo: KlineRepository) -> bool:
+    """兜底判定: 今天是交易日、已过管道时刻+缓冲、当日分区还没有 → 该补跑。"""
+    from datetime import timedelta
+
+    from app.market_time import cn_now
+
+    sched = preferences.get_pipeline_schedule()
+    now = cn_now()
+    target = now.replace(hour=sched["hour"], minute=sched["minute"], second=0, microsecond=0)
+    if now < target + timedelta(minutes=_CATCHUP_GRACE_MIN):
+        return False  # 还没到管道时刻(或刚到, cron 可能正在跑) → 不抢跑
+    if not _is_trading_day_cn(now.date()):
+        return False  # 休市日无数据可拉
+    return not _daily_partition_exists(repo, now.date())
+
+
+def _make_pipeline_then_refresh(repo: KlineRepository, capset: CapabilitySet):
+    """构造盘后管道执行体 (cron 调度与兜底补跑共用)。
+
+    与手动触发 (/api/pipeline/run) 对齐: 管道落盘后重建 Polars 内存缓存,
+    否则 live_agg 的昨日连板数等基准列会停留在旧交易日, 次日开盘连板梯队
+    整体少算一档 (仅手动触发或重启才会刷缓存, cron 调度路径此前漏了这步)。
+    用 app.state 上的**实时** capset(周期重探会热更新它), 而非启动时捕获的
+    旧 capset —— 否则 Key 中途过期/续费后, 调度管道仍按旧档位打端点。
+    """
+
+    def _pipeline_then_refresh(on_progress=None):
+        app_state = _get_app_state()
+        capset_live = getattr(app_state, "capabilities", None) or capset
+        # 管道运行期间暂停实时行情取数, 防止覆写同一批 parquet 竞态
+        qs = getattr(app_state, "quote_service", None)
+        try:
+            if qs:
+                with qs.paused():
+                    result = run_now(repo, capset_live, on_progress=on_progress)
+            else:
+                result = run_now(repo, capset_live, on_progress=on_progress)
+        finally:
+            # 即便有阶段软失败(run_now 末尾抛 PipelineStageError), 已落盘的日K/enriched
+            # 仍需刷进内存缓存, 否则 live_agg 基准列停留在旧交易日。放 finally 保证部分
+            # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
+            repo.refresh_cache()
+        return result
+
+    return _pipeline_then_refresh
+
+
+def _run_catchup_pipeline(repo: KlineRepository, capset: CapabilitySet) -> None:
+    """兜底补跑盘后管道 (15 分钟一轮, 满足 _pipeline_due_and_missing 才动)。
+
+    复用 _scheduled_pipeline_task: 同样的单飞/执行槽/缓存刷新/数据发布钩子;
+    管道本身幂等 (日K有数据时跳 batch), cron 已正常跑过时这里查询直接跳过。
+    """
+    try:
+        if not _pipeline_due_and_missing(repo):
+            return
+        sched = preferences.get_pipeline_schedule()
+        logger.warning(
+            "catch-up: 盘后管道当日数据缺失 (错过 %02d:%02d 调度, 服务重启/关机?), 自动补跑",
+            sched["hour"], sched["minute"],
+        )
+        _scheduled_pipeline_task(_make_pipeline_then_refresh(repo, capset))
+    except Exception:  # noqa: BLE001 — 兜底线绝不能抛崩调度器
+        logger.exception("catch-up pipeline failed; will retry next poll")
 
 
 def _invalidate(table: str | None = None) -> None:
@@ -1361,36 +1455,23 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     )
 
     # 盘后: 日 K + enriched（时间由偏好决定）
-    def _pipeline_then_refresh(on_progress=None):
-        # 与手动触发 (/api/pipeline/run) 对齐: 管道落盘后重建 Polars 内存缓存,
-        # 否则 live_agg 的昨日连板数等基准列会停留在旧交易日, 次日开盘连板梯队
-        # 整体少算一档 (仅手动触发或重启才会刷缓存, cron 调度路径此前漏了这步)。
-        # 用 app.state 上的**实时** capset(周期重探会热更新它), 而非启动时捕获的
-        # 旧 capset —— 否则 Key 中途过期/续费后, 调度管道仍按旧档位打端点。
-        app_state = _get_app_state()
-        capset_live = getattr(app_state, "capabilities", None) or capset
-        # 管道运行期间暂停实时行情取数, 防止覆写同一批 parquet 竞态
-        qs = getattr(app_state, "quote_service", None)
-        try:
-            if qs:
-                with qs.paused():
-                    result = run_now(repo, capset_live, on_progress=on_progress)
-            else:
-                result = run_now(repo, capset_live, on_progress=on_progress)
-        finally:
-            # 即便有阶段软失败(run_now 末尾抛 PipelineStageError), 已落盘的日K/enriched
-            # 仍需刷进内存缓存, 否则 live_agg 基准列停留在旧交易日。放 finally 保证部分
-            # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
-            repo.refresh_cache()
-        return result
-
     scheduler.add_job(
-        lambda: _scheduled_pipeline_task(_pipeline_then_refresh),
+        lambda: _scheduled_pipeline_task(_make_pipeline_then_refresh(repo, capset)),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),
         id="daily_pipeline",
         misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
+    # 盘后管道兜底轮询: 服务活着就每 15 分钟查一次「今天该跑的管道跑了没」,
+    # 没跑就补跑 (关机错过 15:35 的, 开机后 ≤15 分钟自动补上; 见 _run_catchup_pipeline)
+    scheduler.add_job(
+        lambda: _run_catchup_pipeline(repo, capset),
+        trigger=IntervalTrigger(minutes=_CATCHUP_INTERVAL_MIN),
+        id="pipeline_catchup",
+        misfire_grace_time=300,
         replace_existing=True,
     )
 
