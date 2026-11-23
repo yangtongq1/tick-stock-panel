@@ -55,6 +55,10 @@ class FuyaoClient:
             base_url=base_url,
             headers={"X-api-key": api_key},
             timeout=timeout,
+            # trust_env=False: 直连行情 API, 不吃系统代理环境变量。
+            # 桌面代理退出/换端口时, trust_env=True 会把请求转发给死代理端口
+            # → WinError 10061, 与 aksource loopback 劫持同族问题 (2026-11-23)。
+            trust_env=False,
         )
 
     def close(self) -> None:

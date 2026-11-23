@@ -102,7 +102,13 @@ class GenericHTTPProvider:
     def __init__(self, config: CustomSourceConfig) -> None:
         self.config = config
         self.name = config.name
-        self._client = httpx.Client(timeout=30.0)
+        # trust_env=False: 绝不吃系统代理环境变量。自定义数据源绝大多数是
+        # 本机/内网服务 (aksource 127.0.0.1:3021), 桌面代理 (Clash 等) 一旦
+        # 退出/换端口, httpx 默认 trust_env=True 会把 loopback 请求转发给死
+        # 代理端口 → WinError 10061 连接拒绝, 盘中实时行情全挂 (2026-11-23
+        # 11:46 起实测: 代理进程死亡, realtime/full_minute 全链路失败 3.5h)。
+        # 外部源 (如 fuyao) 也统一直连: 行情接口无需走代理, 且避免代理单点。
+        self._client = httpx.Client(timeout=30.0, trust_env=False)
         self._minute_pacer = RequestPacer()
 
     def close(self) -> None:
