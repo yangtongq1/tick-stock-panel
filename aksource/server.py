@@ -1356,6 +1356,169 @@ def fund_flow(
     return {"data": rows, "kind": kind}
 
 
+# ---------------------------------------------------------------------------
+# 外围行情 (新浪 hq.sinajs.cn 多前缀聚合): 美三大指数 / A50 / 恒指 /
+# 美元指数 / 离岸人民币 / 外盘商品期货 (能源/贵金属/LME 工业金属)
+# 金十数据等行情看板的同类标的均为公开聚合源, 这里一次请求拉全量。
+# ---------------------------------------------------------------------------
+
+# (新浪符号, 中文名, 分组)。新浪同一 /list= 接口按前缀分流:
+#   gb_   美股指数 (道指/纳指/标普) — 字段: 名称,现价,涨跌幅%,...
+#   hf_   外盘连续期货 — 字段: 现价,,买一,卖一,最高,最低,时间,昨收,开盘,...
+#   DINIW 美元指数 — 字段: 时间,现价,...,昨收,...,名称,日期
+#   fx_s  外汇 — 字段: 时间,现价,买价,卖价,昨收... 名称,日期 (逐字段见解析)
+#   rt_hk 港股指数 — 字段: 代码,名称,开,昨收,高,低,现价,涨跌,涨跌幅,...
+_GLOBAL_SYMBOLS: list[tuple[str, str, str]] = [
+    # 指数
+    ("gb_dji", "道琼斯", "指数"),
+    ("gb_ixic", "纳斯达克", "指数"),
+    ("gb_inx", "标普500", "指数"),
+    ("hf_CHA50CFD", "富时A50期货", "指数"),
+    ("rt_hkHSI", "恒生指数", "指数"),
+    ("rt_hkHSCEI", "恒生国企指数", "指数"),
+    # 汇率
+    ("DINIW", "美元指数", "汇率"),
+    ("fx_susdcnh", "离岸人民币", "汇率"),
+    # 能源
+    ("hf_CL", "WTI原油", "能源"),
+    ("hf_OIL", "布伦特原油", "能源"),
+    ("hf_NG", "美国天然气", "能源"),
+    # 贵金属
+    ("hf_GC", "COMEX黄金", "贵金属"),
+    ("hf_SI", "COMEX白银", "贵金属"),
+    # 工业金属 (LME)
+    ("hf_CAD", "伦铜", "工业金属"),
+    ("hf_AHD", "伦铝", "工业金属"),
+    ("hf_ZSD", "伦锌", "工业金属"),
+    ("hf_NID", "伦镍", "工业金属"),
+    ("hf_PBD", "伦铅", "工业金属"),
+]
+
+_GLOBAL_TTL = 60.0  # 快照看板级缓存; 本机到新浪出站间歇抖动, 加大缓存命中面
+_GLOBAL_CACHE: dict = {"rows": [], "last_ok": 0.0}
+_GLOBAL_LOCK = threading.Lock()
+
+
+def _f(seq: list, i: int) -> float | None:
+    """解析 seq[i] 为 float, 失败返回 None。"""
+    try:
+        v = float(seq[i])
+        return v
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _parse_global_one(sym: str, name: str, group: str, body: str) -> dict | None:
+    """单符号 hq_str 响应行 → 标准化行情行 (字段因前缀而异)。"""
+    try:
+        raw = body.split('="', 1)[1].rsplit('";', 1)[0]
+    except IndexError:
+        return None
+    parts = raw.split(",")
+    if sym.startswith("gb_"):
+        # 名称,现价,涨跌幅,时间,涨跌额,昨收,开盘,最高,最低,...
+        return {
+            "名称": name, "分组": group,
+            "现价": _f(parts, 1), "涨跌幅": _f(parts, 2),
+            "昨收": _f(parts, 5), "开盘": _f(parts, 6),
+            "最高": _f(parts, 7), "最低": _f(parts, 8),
+            "时间": parts[3] if len(parts) > 3 else "",
+        }
+    if sym.startswith("hf_"):
+        # 现价,,买一,卖一,最高,最低,时间,昨收,开盘,量,?,? ,日期,名称,持仓
+        prev = _f(parts, 7)
+        px = _f(parts, 0)
+        chg = (px - prev) / prev * 100 if px and prev else None
+        return {
+            "名称": name, "分组": group,
+            "现价": px, "涨跌幅": round(chg, 3) if chg is not None else None,
+            "昨收": prev, "开盘": _f(parts, 8),
+            "最高": _f(parts, 4), "最低": _f(parts, 5),
+            "时间": parts[6] if len(parts) > 6 else "",
+        }
+    if sym == "DINIW":
+        # 时间,现价,买价,卖价,?,最高,最低,?,昨收,名称,日期
+        prev = _f(parts, 8)
+        px = _f(parts, 1)
+        chg = (px - prev) / prev * 100 if px and prev else None
+        return {
+            "名称": name, "分组": group,
+            "现价": px, "涨跌幅": round(chg, 3) if chg is not None else None,
+            "昨收": prev, "开盘": None,
+            "最高": _f(parts, 5), "最低": _f(parts, 6),
+            "时间": parts[0] if parts else "",
+        }
+    if sym.startswith("fx_s"):
+        # 时间,现价,买价,卖价,?,昨收,买价,卖价,现价,名称,...
+        prev = _f(parts, 5)
+        px = _f(parts, 1)
+        chg = (px - prev) / prev * 100 if px and prev else None
+        return {
+            "名称": name, "分组": group,
+            "现价": px, "涨跌幅": round(chg, 3) if chg is not None else None,
+            "昨收": prev, "开盘": None,
+            "最高": _f(parts, 6), "最低": _f(parts, 7),
+            "时间": parts[0] if parts else "",
+        }
+    if sym.startswith("rt_hk"):
+        # 代码,名称,开,昨收,高,低,现价,涨跌,涨跌幅,...
+        return {
+            "名称": name, "分组": group,
+            "现价": _f(parts, 6), "涨跌幅": _f(parts, 8),
+            "昨收": _f(parts, 3), "开盘": _f(parts, 2),
+            "最高": _f(parts, 4), "最低": _f(parts, 5),
+            "时间": parts[17] if len(parts) > 17 else "",
+        }
+    return None
+
+
+@app.get("/global")
+def global_market(refresh: bool = False) -> dict:
+    """外围行情聚合快照 (新浪多前缀, 单请求拉全量 18 标的)。
+
+    输出行: 名称/分组/现价/涨跌幅/昨收/开盘/最高/最低/时间。
+    分组: 指数 / 汇率 / 能源 / 贵金属 / 工业金属。
+    盘中缓存 60s (上游间歇抖动时优先命中缓存); refresh=true 绕过。
+    """
+    with _GLOBAL_LOCK:
+        if not refresh and _GLOBAL_CACHE["rows"] and \
+                time.time() - _GLOBAL_CACHE["last_ok"] < _GLOBAL_TTL:
+            return {"data": _GLOBAL_CACHE["rows"]}
+
+    syms = ",".join(s for s, _, _ in _GLOBAL_SYMBOLS)
+    # 上游抖动常态: 快失败快重试 (2 次 × 4s), 总时长仍低于 30s 拉取超时
+    txt = http_get(f"https://hq.sinajs.cn/list={syms}", retries=2, timeout=4.0)
+    rows: list[dict] = []
+    if txt:
+        import json as _json  # noqa: F401 — 保持与其他端点一致的解析风格
+        for line in txt.strip().splitlines():
+            line = line.strip().rstrip(";")
+            if not line.startswith("var hq_str_"):
+                continue
+            m = re.match(r'var hq_str_([\w$]+)=', line)
+            if not m:
+                continue
+            key = m.group(1)
+            info = {s: (n, g) for s, n, g in _GLOBAL_SYMBOLS}.get(key)
+            if not info:
+                continue
+            row = _parse_global_one(key, info[0], info[1], line)
+            if row and row.get("现价"):
+                rows.append(row)
+
+    if rows:
+        with _GLOBAL_LOCK:
+            _GLOBAL_CACHE["rows"] = rows
+            _GLOBAL_CACHE["last_ok"] = time.time()
+        log.info("global: %d rows", len(rows))
+        return {"data": rows}
+    # 上游抖动: 回退旧缓存 (标 stale), 无缓存时如实报错
+    with _GLOBAL_LOCK:
+        if _GLOBAL_CACHE["rows"]:
+            return {"data": _GLOBAL_CACHE["rows"], "stale": True}
+    return {"data": [], "error": "新浪外围行情接口失败"}
+
+
 @app.on_event("startup")
 def _start_full_rt_refresher() -> None:
     """FastAPI startup: 拉起全市场行情后台刷新线程 (90s 一轮)"""

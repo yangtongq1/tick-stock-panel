@@ -55,11 +55,13 @@ _SEED_MARKER = ".builtin_presets_seeded"
 # (既不复活用户删过的旧表, 也让新批次表正常创建)。值为批次号, 逐批递增。
 # v2 = 2026-11-19 涨停板三池 (ext_zt_pool / ext_zb_pool / ext_dt_pool)。
 # v3 = 2026-11-19 资金流向 (ext_fund_flow / ext_fund_flow_board)。
+# v4 = 2026-11-23 外围行情 (ext_global: 指数/汇率/能源/贵金属/LME)。
 _SEED_BATCH_MARKER = ".builtin_presets_batch"
-_SEED_BATCH_VERSION = 3
+_SEED_BATCH_VERSION = 4
 _SEED_BATCH_MEMBERS = {
     2: ("ext_zt_pool", "ext_zb_pool", "ext_dt_pool"),
     3: ("ext_fund_flow", "ext_fund_flow_board"),
+    4: ("ext_global",),
 }
 
 
@@ -295,11 +297,50 @@ def _fund_flow_board_preset() -> ExtConfig:
     )
 
 
+def _global_market_preset() -> ExtConfig:
+    """外围行情 (新浪多前缀聚合, 经本地 aksource /global) — market_level 表。
+
+    覆盖金十行情看板同类标的: 美三大指数/A50/恒指、美元指数/离岸人民币、
+    WTI/布油/天然气、COMEX 金银、LME 铜铝锌镍铅。外围市场与 A 股交易日
+    错位 (美股夜里跑、周末无数据), 不做 trading_only 过滤, 30 分钟一盘
+    自然形成历史序列。
+    """
+    return ExtConfig(
+        id="ext_global",
+        label="外围行情",
+        mode="timeseries",
+        market_level=True,
+        fields=[
+            ExtField("名称", "string", "名称"),
+            ExtField("分组", "string", "分组"),
+            ExtField("现价", "float", "现价"),
+            ExtField("涨跌幅", "float", "涨跌幅 %"),
+            ExtField("昨收", "float", "昨收"),
+            ExtField("开盘", "float", "开盘"),
+            ExtField("最高", "float", "最高"),
+            ExtField("最低", "float", "最低"),
+            ExtField("时间", "string", "时间"),
+        ],
+        description="外围行情 (新浪源, 经本地 aksource 聚合; 指数/汇率/能源/贵金属/LME 工业金属)",
+        pull=PullConfig(
+            url="http://127.0.0.1:3021/global",
+            method="GET",
+            response_path="data",
+            field_map={},
+            auth={"type": "none"},
+            timeout_seconds=30,
+            schedule_minutes=30,
+            time_field="__pull_ts__",
+            enabled=True,
+        ),
+    )
+
+
 def _presets() -> list[ExtConfig]:
     return [_concept_preset(), _industry_preset(), _fund_flow_preset(), _fund_flow_board_preset()] + [
         _zt_pool_preset(pool, cid, label, extra)
         for pool, cid, label, extra in _ZT_POOLS_DEF
-    ]
+    ] + [_global_market_preset()]
 
 
 def get_preset(config_id: str) -> ExtConfig | None:

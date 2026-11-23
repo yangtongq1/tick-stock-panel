@@ -145,7 +145,7 @@ class _FakeResp:
 class _FakeClient:
     last: tuple | None = None
 
-    def __init__(self, timeout=None) -> None:
+    def __init__(self, timeout=None, trust_env: bool = True, **_kwargs) -> None:  # noqa: ARG002
         pass
 
     async def __aenter__(self):

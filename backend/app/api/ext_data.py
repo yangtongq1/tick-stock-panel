@@ -1578,7 +1578,8 @@ async def detect_url(body: DetectUrlReq):
         raise HTTPException(400, "仅支持 GET / POST")
 
     try:
-        async with httpx.AsyncClient(timeout=body.timeout_seconds, follow_redirects=True) as client:
+        # trust_env=False: 不走系统代理 (本地聚合源如 aksource 会被桌面代理 502), 见 ext_pull._make_pull_client
+        async with httpx.AsyncClient(timeout=body.timeout_seconds, follow_redirects=True, trust_env=False) as client:
             headers = body.headers or {}
             kwargs: dict = {"headers": headers}
             if method == "POST" and body.body:

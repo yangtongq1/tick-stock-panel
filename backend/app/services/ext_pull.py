@@ -28,13 +28,25 @@ logger = logging.getLogger(__name__)
 _pull_client: ContextVar[httpx.AsyncClient | None] = ContextVar("ext_pull_client", default=None)
 
 
+def _make_pull_client() -> httpx.AsyncClient:
+    """拉取专用 HTTP 客户端。
+
+    trust_env=False: 绝不吃系统代理环境变量。拉取目标包括本地聚合源
+    (aksource 127.0.0.1:3021), 桌面代理 (Clash 等) 对 loopback 的转发
+    几乎必然 502 —— 2026-11-20 起实测整个 ext_pull 链路被代理劫持,
+    所有 ext 表连续多日报 502 的根因。外部源需要代理时由服务方自行
+    部署网关, 或用户在源前面加反代; 本进程不代劳。
+    """
+    return httpx.AsyncClient(trust_env=False)
+
+
 @asynccontextmanager
 async def _pull_client_scope():
     client = _pull_client.get()
     if client is not None:
         yield client
         return
-    async with httpx.AsyncClient() as client:
+    async with _make_pull_client() as client:
         token = _pull_client.set(client)
         try:
             yield client
