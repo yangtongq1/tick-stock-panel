@@ -92,6 +92,49 @@ if not getattr(sys, "frozen", False):
     attach_rotating_log("backend.log", max_mb=10, backup_count=3)
 
 
+def _apply_first_run_defaults() -> None:
+    """首次启动 (无 preferences.json) 时的开箱默认值。
+
+    本仓库自带 aksource 免费数据源 (data/data_sources/aksource.yaml + 启动脚本
+    会拉起 3021)。新机器 clone 后若不设默认, 数据源偏好全走 tickflow 免费档
+    (仅历史日K)、实时行情关闭 → 「没有实时数据/板块/涨停池」多源于此。
+    仅在 preferences.json 不存在时执行一次; 用户此后在设置页的任何修改
+    都以 preferences.json 为准, 不再被覆盖。
+    """
+    from app.services import preferences
+
+    if preferences._path().exists():
+        return  # 老用户配置已存在 → 不碰
+    try:
+        from app.data_providers import custom as custom_sources
+
+        if not custom_sources.is_custom_provider("aksource"):
+            return
+        # aksource.yaml 声明了哪些数据集, 就路由哪些偏好 (按需, 不硬编码全集)
+        pref_to_dataset = {
+            "daily_data_provider": "daily",
+            "adj_factor_provider": "adj_factor",
+            "minute_data_provider": "minute",
+            "full_minute_data_provider": "full_minute",
+            "realtime_data_provider": "realtime",
+            "financial_data_provider": "financial",
+            "depth5_data_provider": "depth5",
+        }
+        defaults = {
+            key: "aksource"
+            for key, dataset in pref_to_dataset.items()
+            if custom_sources.provider_has_dataset("aksource", dataset)
+        }
+        if "realtime_data_provider" in defaults:
+            defaults["realtime_quotes_enabled"] = True
+        preferences.save(defaults)
+        logger.info(
+            "first-run defaults applied: data providers -> aksource, realtime enabled"
+        )
+    except Exception:  # noqa: BLE001 — 默认值失败不阻断启动
+        logger.warning("first-run defaults skipped (non-fatal)")
+
+
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     logger.info(
@@ -235,6 +278,7 @@ async def _application_lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    _apply_first_run_defaults()
     qs.boot_check()
 
     # QuoteService 需要访问 strategy_monitor 等单例

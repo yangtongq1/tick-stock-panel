@@ -42,7 +42,12 @@ Windows 直接**双击 `start.bat`** 即可（等价于 `.\quick-start.ps1`，�
 **停止 / 清理（Windows）**：双击 `stop.bat` 停止全部 TSP 服务（后端 3018 / 数据源 3021 / dev 前端 3011）；
 `stop.bat clean` 进一步移除计划任务 `TSP-*` 并删除 `backend\.venv`（下次 start.bat 自动重建）。
 按命令行特征匹配进程，不影响机器上其他 Python 程序；`data/` 行情数据永不触碰。
-Linux/macOS：`pkill -f "uvicorn app.main:app"` / `pkill -f "server.py"`。
+Linux/macOS：`./stop.sh`（按命令行特征 + 端口匹配，不影响机器上其他 Python 程序）。
+
+启动顺序为**先起后端再起数据源**（两者均由脚本按序带起）：后端拉取失败会自动
+30s 起指数退避重试（封顶 5min），数据源就绪后 1-2 分钟内自动补上——不会出现
+「卡在数据源」的长等待。新机器首启时若无任何偏好配置，后端会自动把实时/分钟/
+板块/财务等数据源路由到免费源 aksource 并启用实时行情，开箱即有数据。
 
 **改了前端代码才需要重建**（此时才需要 Node 20+）：
 `./quick-start.sh rebuild`（Windows: `.\quick-start.ps1 -Rebuild`）。

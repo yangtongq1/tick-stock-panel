@@ -756,8 +756,15 @@ class PullScheduler:
 
         self._submit(_apply)
 
-    async def _execute_pull(self, fresh: ExtConfig, store: ExtConfigStore) -> None:
-        """执行一次拉取并把成功/失败状态写回配置 (间隔制与固定时刻制共用)。"""
+    async def _execute_pull(self, fresh: ExtConfig, store: ExtConfigStore) -> bool:
+        """执行一次拉取并把成功/失败状态写回配置 (间隔制与固定时刻制共用)。
+
+        返回是否成功 — 调用方 (_run_loop) 据此在失败后用短间隔退避重试:
+        本地数据源 (aksource 3021) 由启动脚本拉起, 后端先起时首拉会失败,
+        原实现要等整个 schedule_minutes (zt_pool 30min / 概念行业 1440min)
+        才重试, 用户看到的就是「被数据源卡住」。退避重试让数据源起来后
+        1-2 分钟内自动补上。
+        """
         try:
             # 例行定时刷新: 不清策略结果缓存 (见 invalidate_ext_caches),
             # 否则策略页每轮拉取后整页空白, 直到下次全量重算完成。
@@ -770,6 +777,7 @@ class PullScheduler:
             fresh.pull.last_rows = n
             await run_ext_data_io(store.upsert, fresh, keep_strategy_cache=True)
             logger.info("PullScheduler: %s success, %d rows", fresh.id, n)
+            return True
         except Exception as e:
             fresh2 = await run_ext_data_io(store.get, fresh.id)
             if fresh2 and fresh2.pull:
@@ -778,6 +786,7 @@ class PullScheduler:
                 fresh2.pull.last_message = str(e)[:200]
                 await run_ext_data_io(store.upsert, fresh2, keep_strategy_cache=True)
             logger.warning("PullScheduler: %s error: %s", fresh.id, e)
+            return False
 
     async def _run_daily_at(self, config_id: str, store: ExtConfigStore, hhmm: str) -> None:
         """固定时刻 (北京时间) 周期性拉取: 每天 / 每周 / 每月 / 仅交易日。
@@ -803,7 +812,21 @@ class PullScheduler:
                 _is_scheduled_day(now, fresh.pull)
                 and now >= target and not _ran_at_or_after(fresh.pull, target)
             ):
-                await self._execute_pull(fresh, store)
+                ok = await self._execute_pull(fresh, store)
+                if not ok:
+                    # 当日拉取失败 (典型: 本地数据源 aksource 尚未就绪)。
+                    # last_run 失败时也更新 → 直接 continue 会让当天跳过,
+                    # 这里 60s 短退避重拉 (最多 5 轮, 防数据源全天挂时死循环),
+                    # 成功后回到正常日程。
+                    for attempt in range(5):
+                        await asyncio.sleep(60)
+                        if not self._running:
+                            return
+                        fresh = await run_ext_data_io(store.get, config_id)
+                        if not fresh or not fresh.pull or not fresh.pull.enabled:
+                            return
+                        if await self._execute_pull(fresh, store):
+                            break
                 continue
             nxt = _next_scheduled_target(now, hhmm, fresh.pull)
             # 预告下次运行时间 (UTC ISO, 与间隔制同口径), 供前端展示
@@ -818,12 +841,17 @@ class PullScheduler:
 
     async def _sleep_interval_reloading(
         self, config_id: str, store: ExtConfigStore, interval: float,
+        *, check_interval_change: bool = True,
     ) -> None:
         """间隔制睡眠, 但每 60s 重读配置。
 
         用户把间隔制改成固定时刻 (或改间隔/停用) 时, 旧实现要等整段间隔睡完
         才生效 —— 24h 间隔意味着新时刻要推迟一天。这里分片睡眠, 让配置改动
         在一分钟内生效。
+
+        check_interval_change=False 用于失败退避睡眠: 退避间隔 (30s~300s)
+        天然不等于配置间隔, 逐片比对会把 >60s 的退避切短成 60s (「封顶
+        5min」失效)。退避期间仍检测停用/切固定时刻这两种用户改动。
         """
         remaining = float(interval)
         while remaining > 0 and self._running:
@@ -833,8 +861,10 @@ class PullScheduler:
             fresh = await run_ext_data_io(store.get, config_id)
             if not fresh or not fresh.pull or not fresh.pull.enabled:
                 return
-            if fresh.pull.schedule_time or _interval_seconds(fresh.pull) != interval:
-                return  # 调度形态或间隔变了 → 回外层重读并重新安排
+            if fresh.pull.schedule_time:
+                return  # 切成固定时刻制 → 交回外层重读
+            if check_interval_change and _interval_seconds(fresh.pull) != interval:
+                return  # 间隔被用户改了 → 交回外层重读
 
     async def _run_loop(self, config: ExtConfig) -> None:
         """单个配置的定时拉取循环。
@@ -869,9 +899,36 @@ class PullScheduler:
                     continue
 
                 # 先执行一次 (启用即拉取, 让用户立刻看到生效)
-                await self._execute_pull(fresh, store)
+                ok = await self._execute_pull(fresh, store)
 
-                # 间隔取自最新配置 (每次重新读取, 修复改间隔不生效)
+                # 失败退避重试 (本地数据源尚未就绪的典型场景):
+                # 正常间隔 (30min~1440min) 对「等 aksource 起来」太钝, 失败后
+                # 30s 起指数退避 (封顶 5min), 成功即恢复正常间隔。
+                backoff_s = 30.0
+                while not ok and self._running:
+                    interval = backoff_s
+                    latest = await run_ext_data_io(store.get, config.id)
+                    if not latest or not latest.pull or not latest.pull.enabled:
+                        break  # 中途被停用 → 交回外层
+                    if latest.pull.schedule_time:
+                        break  # 中途改成固定时刻制 → 交回外层
+                    latest.pull.next_run = datetime.fromtimestamp(
+                        datetime.now(UTC).timestamp() + interval, tz=UTC
+                    ).isoformat()
+                    await run_ext_data_io(store.upsert, latest, keep_strategy_cache=True)
+                    # check_interval_change=False: 退避间隔≠配置间隔, 逐片比对
+                    # 会把 >60s 的退避切短 (且本循环自己管理重试节奏)
+                    await self._sleep_interval_reloading(
+                        config.id, store, interval, check_interval_change=False
+                    )
+                    if not self._running:
+                        break
+                    fresh = await run_ext_data_io(store.get, config.id)
+                    if not fresh or not fresh.pull or not fresh.pull.enabled:
+                        break
+                    ok = await self._execute_pull(fresh, store)
+                    backoff_s = min(backoff_s * 2, 300.0)
+                # 成功后恢复正常间隔 (每次重新读取, 修复改间隔不生效)
                 interval = _interval_seconds(pull)
                 # 预告下次运行时间, 供前端展示
                 next_dt = datetime.now(UTC).timestamp() + interval
