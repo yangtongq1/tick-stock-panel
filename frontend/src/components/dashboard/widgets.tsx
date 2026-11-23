@@ -361,6 +361,102 @@ export function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionC
   )
 }
 
+// ===== 外围行情 (美期指/港股/汇率/能源/贵金属/LME) =====
+// 数据源: ext_global 扩展表 (aksource /global 聚合新浪, 30 分钟调度拉取)。
+// 与 MonitorWidget 同款自取数据模式 — overview 主查询不含外围行情, 避免为
+// 小众 widget 拖累所有用户的主链路; 表不存在时给引导提示。
+/** 行情展示顺序: 与开盘时段呼应 — 亚太(A50/恒指) → 美股隔夜 → 汇率 → 商品 */
+const _GLOBAL_GROUP_ORDER = ['指数', '汇率', '能源', '贵金属', '工业金属'] as const
+
+/** 同名标的保留 __pull_ts__ 最新一行 (同日多盘去重, 读侧收敛最新盘) */
+function latestGlobalRows(rows: Record<string, any>[]): Record<string, any>[] {
+  const seen = new Map<string, Record<string, any>>()
+  for (const r of rows) {
+    const key = String(r['名称'] ?? '')
+    if (!key) continue
+    const prev = seen.get(key)
+    if (!prev || String(r['__pull_ts__'] ?? '') >= String(prev['__pull_ts__'] ?? '')) seen.set(key, r)
+  }
+  return [...seen.values()]
+}
+
+export function GlobalMarketWidget() {
+  const q = useQuery({
+    queryKey: ['ext-data-rows', 'ext_global', undefined, 200],
+    queryFn: () => api.extDataRows('ext_global', { limit: 200 }),
+    refetchInterval: 60_000,
+    // 挂后台的看板页关闭即停; 30 分钟调度写入后 EXT_DATA_QUERY_PREFIXES
+    // 失效 'ext-data-rows', 这里 60s 轮询兜底
+  })
+  const rows = latestGlobalRows(q.data?.rows ?? [])
+  const groups = new Map<string, Record<string, any>[]>()
+  for (const r of rows) {
+    const g = String(r['分组'] ?? '其他')
+    if (!groups.has(g)) groups.set(g, [])
+    groups.get(g)!.push(r)
+  }
+  const ordered: string[] = _GLOBAL_GROUP_ORDER.filter(g => groups.has(g))
+  for (const g of groups.keys()) if (!_GLOBAL_GROUP_ORDER.includes(g as never)) ordered.push(g)
+  const lastTs = rows.reduce<string>((m, r) => {
+    const t = String(r['__pull_ts__'] ?? '')
+    return t > m ? t : m
+  }, '')
+
+  if (q.isLoading) {
+    return <div className="flex h-full min-h-24 items-center justify-center text-[11px] text-muted">加载外围行情…</div>
+  }
+  if (!q.data || rows.length === 0) {
+    return (
+      <div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center">
+        <p className="text-[11px] text-muted">暂无外围行情数据</p>
+        <p className="text-[10px] text-muted/70">需启用扩展表 <span className="font-mono">ext_global</span> (数据页配置)</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      {ordered.map(g => {
+        const items = groups.get(g)!
+        return (
+          <div key={g}>
+            <div className="mb-0.5 flex items-center justify-between">
+              <span className="text-[10px] font-medium text-muted">{g}</span>
+              <span className="text-[9px] text-muted/60">{items.length}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-1 xl:grid-cols-3">
+              {items.map(r => {
+                const pct = typeof r['涨跌幅'] === 'number' ? r['涨跌幅'] : null
+                const px = typeof r['现价'] === 'number' ? r['现价'] : null
+                return (
+                  <div
+                    key={String(r['名称'])}
+                    title={`${r['名称']} · 昨收 ${fmtPrice(r['昨收'])} · 高 ${fmtPrice(r['最高'])} / 低 ${fmtPrice(r['最低'])}${r['时间'] ? ` · ${r['时间']}` : ''}`}
+                    className="min-w-0 rounded-md border border-border/40 bg-elevated/40 px-1.5 py-1 transition-colors hover:border-accent/30 hover:bg-elevated/70"
+                  >
+                    <div className="truncate text-[10px] text-foreground">{r['名称']}</div>
+                    <div className="flex items-baseline justify-between gap-1 font-mono">
+                      <span className="truncate text-[11px] text-foreground">{fmtPrice(px)}</span>
+                      <span className={`shrink-0 text-[10px] font-semibold ${pctClass(pct)}`}>
+                        {pct == null ? '—' : `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+      {lastTs && (
+        <div className="pt-0.5 text-right text-[9px] text-muted/50">
+          拉取 {lastTs.replace('T', ' ').slice(5, 16)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ===== 监控中心小组件 — 前 10 条触发记录 =====
 const _SOURCE_BADGE: Record<string, string> = {
   strategy: 'bg-amber-400/10 text-amber-400',

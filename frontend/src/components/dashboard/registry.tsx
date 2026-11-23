@@ -8,7 +8,7 @@ import type { CSSProperties } from 'react'
 import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, BarChart3, BellRing, Flame, Gauge, LineChart, Link2, Sparkles, Target, TrendingUp, TrendingDown, Coins, Repeat } from 'lucide-react'
+import { ArrowUpRight, BarChart3, BellRing, Flame, Gauge, Globe, LineChart, Link2, Sparkles, Target, TrendingUp, TrendingDown, Coins, Repeat } from 'lucide-react'
 import type { AlertEvent, OverviewMarket } from '@/lib/api'
 import { fmtBigNum } from '@/lib/format'
 import type { DimensionMembersTarget } from '@/components/DimensionMembersDialog'
@@ -16,7 +16,7 @@ import { SealedBadge } from '@/components/SealedBadge'
 import { scoreColor, fmtPrice, fmtStockPct, pctClass, compactCount, SectionTitle, MiniMetric, KpiCell } from './shared'
 import { EmotionScoreConfigDialog } from './EmotionScoreConfigDialog'
 import {
-  IndexTicker, BreadthBar, DistributionBars, EmotionRadar, LadderMini, StockList, HotRankCard, MonitorWidget,
+  IndexTicker, BreadthBar, DistributionBars, EmotionRadar, LadderMini, StockList, HotRankCard, MonitorWidget, GlobalMarketWidget,
   stockListNav, rankNav,
 } from './widgets'
 import type { DashboardItem, WidgetType } from './layout'
@@ -263,6 +263,17 @@ export const WIDGET_DEFS: WidgetDef[] = [
     id: 'ext-link', label: '外部链接', icon: Link2, minW: 2, minH: 5, defW: 6, defH: 10,
     render: (_ctx, item) => <ExternalLinkWidget title={item.p?.title ?? '外部链接'} url={item.p?.url ?? 'about:blank'} />,
   },
+  {
+    id: 'global', label: '外围行情', icon: Globe, minW: 2, minH: 5, defW: 4, defH: 10,
+    render: () => sectionCard(
+      <>
+        <SectionTitle icon={Globe} title="外围行情" hint="美期指/港股/汇率/商品" />
+        <div className="max-h-full overflow-y-auto">
+          <GlobalMarketWidget />
+        </div>
+      </>,
+    ),
+  },
 ]
 
 const _DEF_INDEX = new Map(WIDGET_DEFS.map(d => [d.id, d]))
@@ -297,4 +308,5 @@ export const DEFAULT_LAYOUT: DashboardItem[] = [
   { i: 'losers', t: 'losers', x: 2, y: 21, w: 2, h: 13 },
   { i: 'turnover', t: 'turnover', x: 4, y: 21, w: 2, h: 13 },
   { i: 'activity', t: 'activity', x: 6, y: 21, w: 2, h: 13 },
+  { i: 'global', t: 'global', x: 8, y: 21, w: 4, h: 13 },
 ]
