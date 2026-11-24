@@ -132,13 +132,26 @@ if (Test-Http "http://127.0.0.1:3018/api/capabilities") {
 }
 
 # 免费数据源 aksource (腾讯/新浪/东财聚合; 复用 backend venv)
-if (Test-Http "http://127.0.0.1:3021/") {
+# 注意: 健康探测用 /realtime (真实路由)。/ 根路由不存在返回 404,
+# 旧版 Test-Http 会把 404 误判为「在运行」而跳过启动 → 后端全量 10061。
+if (Test-Http "http://127.0.0.1:3021/realtime") {
   Write-Host "[tsp] 数据源 3021 已在运行"
 } else {
   Write-Host "[tsp] 启动免费数据源 3021 ..."
   Push-Location "$Root\aksource"
   cmd /c "start /min `"aksource`" cmd /c `"`"$py`" server.py >> `"$logDir\aksource.log`" 2>&1`"" | Out-Null
   Pop-Location
+  # 等 aksource 就绪 (30s 预热: instruments 加载 + 首轮全市场刷新)
+  $aksReady = $false
+  foreach ($i in 1..15) {
+    if (Test-Http "http://127.0.0.1:3021/realtime") { $aksReady = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  if ($aksReady) {
+    Write-Host "[tsp] 数据源 3021 就绪" -ForegroundColor Green
+  } else {
+    Write-Host "[tsp] 数据源 3021 未在 30s 内就绪 — 查 $logDir\aksource.log" -ForegroundColor Yellow
+  }
 }
 
 # ============================================================================

@@ -35,9 +35,32 @@ try:  # requests 优先; 环境只有 httpx 时 (TSP backend venv) 自动降级
         return _requests_mod.get(url, headers=headers, timeout=timeout)
 except ImportError:  # httpx 兼容层
     import httpx as _requests_mod  # type: ignore[no-redef]
+    import threading as _threading
     _requests_exc = (Exception,)
+    # httpx.get 顶层函数每次调用新建/销毁 Client; 全市场刷新 8 线程并发高频
+    # 调用时, 在部分 Windows 环境会触发 ssl/native 层静默崩溃 (2026-11-24
+    # 桌面镜像实测: refresher 第一轮即崩, 日志无 traceback 直接消失)。
+    # 改为线程本地长连 Client (trust_env=False 直连 + 连接池复用):
+    # - 消除每次调用的握手/TLS 开销 (~10x 提速);
+    # - 单线程单实例, 无跨线程共享竞态。
+    _tls_client = _threading.local()
+    def _get_thread_client():
+        c = getattr(_tls_client, "c", None)
+        if c is None:
+            c = _requests_mod.Client(timeout=10.0, trust_env=False)
+            _tls_client.c = c
+        return c
     def _http_get_raw(url: str, headers: dict, timeout: float):
-        return _requests_mod.get(url, headers=headers, timeout=timeout)
+        try:
+            return _get_thread_client().get(url, headers=headers, timeout=timeout)
+        except Exception:
+            # client 可能因 keep-alive 断连等失效, 重建一次重试
+            try:
+                _tls_client.c.close()
+            except Exception:
+                pass
+            _tls_client.c = None
+            return _get_thread_client().get(url, headers=headers, timeout=timeout)
 from fastapi import FastAPI  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
