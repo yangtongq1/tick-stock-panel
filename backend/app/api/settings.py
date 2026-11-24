@@ -1220,8 +1220,9 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
                 detail="本地暂无行情数据，请先在「数据」页同步后再开启实时行情",
             )
     if req.realtime_quotes_enabled and qs and qs.is_paused():
-        # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
-        raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
+        # 管道/数据修正运行期间落盘被暂停 — 此时开启的实时行情会一直不落盘,
+        # 给用户混淆; 仍等同步结束后再开 (拉取/看板在暂停态本就持续可用)
+        raise HTTPException(status_code=409, detail="数据同步运行中（行情落盘临时暂停），请稍后再开启实时行情")
     if req.realtime_quotes_enabled:
         # 历史完整性门禁: 检测到最近交易日的盘中快照/缺口时禁止开启 —
         # 实时 flush 写出"今天"分区后, 盘后管道的"只刷今天"分支会让停机日的

@@ -10,6 +10,11 @@ from app.services.index_const import CORE_INDEX_SYMBOLS
 
 @pytest.fixture
 def market(monkeypatch, tmp_path):
+    # 隔离本机 data/user_data/preferences.json: 运行机器上配置了 aksource 等
+    # 自定义实时源时, _fetch_full_market_quotes 的 configured 覆盖逻辑会把
+    # provider_name 改写为 custom 路径, 导致 quotes.get 不被调用 (CI 无此文件,
+    # 本机跑必挂)。fixture 统一视为无用户配置。
+    monkeypatch.setattr(preferences, "load", lambda: {})
     monkeypatch.setattr(watchlist, "list_symbols", lambda: [
         {"symbol": "000985.SH"}, {"symbol": "159558.SZ"}, {"symbol": "600519.SH"},
     ])
@@ -213,13 +218,43 @@ def test_simultaneous_manual_and_worker_refresh_share_one_upstream_round(market,
     assert calls == [1, 1]
 
 
-def test_paused_worker_cannot_be_forced_to_write_by_refresh(market, monkeypatch):
+def test_paused_worker_keeps_fetching_but_never_writes(market, monkeypatch):
+    """2026-11-24 起 pause 只停落盘: 暂停态拉取照常执行, 写盘段整段跳过。"""
     service, _, _ = market
-    fetch = Mock()
-    monkeypatch.setattr(service, "_fetch_full_market_quotes", fetch)
+    # 走真实落盘路径, 隔离 market worker (同 test_partial_quotes_merge...)
+    del service._process_full_market_records
+    writes = []
+    monkeypatch.setattr(service, "_flush_live_enriched", lambda *a, **kw: writes.append("enriched"))
+    monkeypatch.setattr(service, "_update_volume_delta", lambda *a: None)
+    monkeypatch.setattr(quote_service, "_persist_last_fetch", lambda *a: None)
+    monkeypatch.setattr(service, "_broadcast_quote_updated", lambda *a: None)
+    repo = service._repo
+    repo.flush_live_daily = lambda df: writes.append("daily")
+    repo.flush_live_daily_asset = lambda asset, df: writes.append(f"daily-{asset}")
+    repo.merge_live_daily_asset = lambda asset, df: writes.append(f"merge-{asset}")
+
+    rows = [{"symbol": s, "last_price": 10., "open": 10., "high": 11., "low": 9., "volume": 100.}
+            for s in ["600519.SH", "159558.SZ"]]
+
     service.pause()
-    assert service._fetch_quotes() is False
-    fetch.assert_not_called()
+    service._process_full_market_records(rows, t0=0., now_ts=0.)
+    assert not writes, "暂停态写盘段必须整段跳过"
+
+    service.resume()
+    service._process_full_market_records(rows, t0=0., now_ts=0.)
+    assert writes, "恢复后写盘段正常执行"
+
+
+def test_paused_worker_cannot_be_forced_to_write_by_refresh(market, monkeypatch):
+    """暂停态下 _fetch_quotes 仍执行拉取, 但不评估监控 (评估链含写盘)。"""
+    fetch = Mock()
+    monkeypatch.setattr(service := market[0], "_fetch_full_market_quotes", fetch)
+    evaluate = Mock()
+    monkeypatch.setattr(service, "_evaluate_monitors", evaluate)
+    service.pause()
+    assert service._fetch_quotes() is False  # fetch 未推进 _fetched_at → False
+    fetch.assert_called_once()  # 新语义: 拉取照常执行
+    evaluate.assert_not_called()  # 评估照旧拦截
 
 
 def test_last_fetch_persistence_does_not_change_source_version(monkeypatch, tmp_path):

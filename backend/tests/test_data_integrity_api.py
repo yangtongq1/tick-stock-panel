@@ -53,7 +53,9 @@ def app_env(tmp_path, monkeypatch):
 
 
 def finished(store, jid):
-    deadline = time.monotonic() + 3
+    # 30s: repair job 在 Windows 上含 replace_with_retry 读锁重试 (最多 5s/文件)
+    # + enriched 重算, 实测可达 5-8s; 3s 窗口在慢机会间歇性超时。
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         job = store.get(jid)
         if job["status"] in ("succeeded", "failed"):

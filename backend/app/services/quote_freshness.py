@@ -63,8 +63,6 @@ class QuoteFreshness:
             return result("unknown", "行情日期异常，请检查数据源")
         if row.get("prepared_daily"):
             return result("historical", "日K补齐数据，尚未取得实时行情")
-        if self.paused:
-            return result("paused", "实时行情暂时暂停，保留最近有效数据")
         if not self.enabled:
             return result("disabled", "实时行情未开启，保留最近有效数据")
         if stamp is None:
@@ -72,5 +70,9 @@ class QuoteFreshness:
         active = clock < time(11, 30) or time(13) <= clock < time(15)
         reference = self.now if active else datetime.combine(today, time(11, 30) if clock < time(13) else time(15), CN_TZ)
         if reference.timestamp() * 1000 - stamp > self.max_age_ms:
+            # 暂停态 (2026-11-24 起 pause 只停落盘, 拉取照常) 行情本该持续更新;
+            # 暂停期间却拿到过期时间戳, 说明拉取也停滞了, 用 paused 态明确提示
+            if self.paused:
+                return result("paused", "数据同步运行中，行情暂未更新，保留最近有效数据")
             return result("delayed", "行情更新延迟，保留最近有效数据，请检查数据源与连接")
         return result("live", "实时行情") if active else result("historical", "休盘行情，按最后有效时间显示")

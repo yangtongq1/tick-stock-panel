@@ -423,14 +423,16 @@ class QuoteService:
     # ================================================================
 
     def pause(self) -> None:
-        """临时暂停行情轮询取数 (不关闭线程、不改 preferences)。
+        """临时暂停行情落盘与监控评估 (拉取/看板/SSE 不受影响)。
 
         用于盘后管道/数据修正运行期间, 防止实时行情覆写管道正在写的 parquet。
-        与 stop() 的区别: 线程继续存活但跳过 _fetch_quotes; preferences 开关态不变,
-        管道结束调用 resume() 即恢复。线程级检查, 即时生效, 无 join 等待。
+        2026-11-24 起 pause 只停落盘: 拉取与内存缓存照常更新 — 管道跑多久,
+        看板行情就新多久, 不再出现"同步期间页面行情冻结"。
+        与 stop() 的区别: 线程继续存活且继续取数; preferences 开关态不变,
+        管道结束调用 resume() 即恢复落盘。线程级检查, 即时生效, 无 join 等待。
         """
         self._paused = True
-        logger.info("行情轮询已临时暂停 (管道/修正运行中)")
+        logger.info("行情落盘已临时暂停 (管道/修正运行中, 拉取与看板不受影响)")
 
     def resume(self) -> None:
         """恢复暂停的行情轮询取数 (对应 pause)。"""
@@ -760,44 +762,44 @@ class QuoteService:
         # _thread 指向新线程/None 时, 老循环在下一轮检查点自行退出。
         while self._running and self._enabled and self._thread is threading.current_thread():
             try:
-                # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
-                # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
-                if not self._paused:
-                    phase = self._market_phase()
-                    if self._should_fetch_for_phase(phase):
-                        is_final = phase in {"morning_final", "close_final"}
-                        ok = self._fetch_quotes(
-                            final=is_final,
-                            final_boundary_ms=self._final_boundary_ms(phase),
-                        )
-                        if is_final:
-                            key = self._final_sync_key(phase)
-                            label = "午休" if phase == "morning_final" else "收盘"
-                            if key and ok and self._last_final_confirmed:
-                                self._final_sync_done.add(key)
-                                self._final_sync_failed.pop(key, None)
-                                logger.info("%s 最终行情同步完成 (快照时间戳已达边界), 进入休盘态", label)
-                            elif key and self._past_final_deadline(phase):
-                                # 重试窗口结束仍未取得边界后快照: 接受现状停止轮询。
-                                # 实测有实时源收盘后长期返回竞价前旧价 (快照时间戳可信但价格不更新),
-                                # 此时盲目落盘只会固化旧价 —— 交由 15:30 盘后管道按官方日线校正。
-                                self._final_sync_done.add(key)
-                                self._final_sync_failed[key] = (
-                                    "fetch_failed" if not ok else "unconfirmed_snapshot"
-                                )
-                                logger.warning(
-                                    "%s 定版窗口结束仍未取得边界后快照 (%s), 停止轮询; "
-                                    "当日分区由盘后管道按官方日线值级校正",
-                                    label, "拉取失败" if not ok else "快照未确认",
-                                )
-                            elif key:
-                                self._final_sync_failed[key] = (
-                                    "fetch_failed" if not ok else "unconfirmed_snapshot"
-                                )
-                                if not ok:
-                                    logger.warning("%s 最终行情同步失败, 将继续重试", label)
-                    else:
-                        logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
+                # 暂停态 (_paused) 不再跳过取数 — 只停落盘/监控评估
+                # (见 _fetch_quotes / _process_full_market_records): 管道运行期间
+                # 看板行情持续更新, parquet 写盘竞态由写盘段门控挡住。
+                phase = self._market_phase()
+                if self._should_fetch_for_phase(phase):
+                    is_final = phase in {"morning_final", "close_final"}
+                    ok = self._fetch_quotes(
+                        final=is_final,
+                        final_boundary_ms=self._final_boundary_ms(phase),
+                    )
+                    if is_final:
+                        key = self._final_sync_key(phase)
+                        label = "午休" if phase == "morning_final" else "收盘"
+                        if key and ok and self._last_final_confirmed:
+                            self._final_sync_done.add(key)
+                            self._final_sync_failed.pop(key, None)
+                            logger.info("%s 最终行情同步完成 (快照时间戳已达边界), 进入休盘态", label)
+                        elif key and self._past_final_deadline(phase):
+                            # 重试窗口结束仍未取得边界后快照: 接受现状停止轮询。
+                            # 实测有实时源收盘后长期返回竞价前旧价 (快照时间戳可信但价格不更新),
+                            # 此时盲目落盘只会固化旧价 —— 交由 15:30 盘后管道按官方日线校正。
+                            self._final_sync_done.add(key)
+                            self._final_sync_failed[key] = (
+                                "fetch_failed" if not ok else "unconfirmed_snapshot"
+                            )
+                            logger.warning(
+                                "%s 定版窗口结束仍未取得边界后快照 (%s), 停止轮询; "
+                                "当日分区由盘后管道按官方日线值级校正",
+                                label, "拉取失败" if not ok else "快照未确认",
+                            )
+                        elif key:
+                            self._final_sync_failed[key] = (
+                                "fetch_failed" if not ok else "unconfirmed_snapshot"
+                            )
+                            if not ok:
+                                logger.warning("%s 最终行情同步失败, 将继续重试", label)
+                else:
+                    logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
             except Exception as e:  # noqa: BLE001
                 logger.warning("行情轮询异常: %s", e)
 
@@ -824,11 +826,13 @@ class QuoteService:
 
         final_boundary_ms: final 定版的边界时间戳 (ms)。传入时快照时间戳未达边界
         的本轮不落盘 (见 _process_full_market_records)。
+
+        暂停态 (_paused) 不再拦截拉取 — 只停 parquet 落盘与监控评估
+        (见 _process_full_market_records), 拉取/缓存/SSE 广播继续:
+        管道跑多久看板行情就新多久, 写盘竞态照旧被挡住。
         """
         self._cleanup_day_scoped_state()
         with self._fetch_lock:
-            if self._paused:
-                return False
             from app.services import preferences
 
             demand = tuple((a, tuple(sorted(s))) for a, s in self._wanted_quotes().items())
@@ -847,7 +851,8 @@ class QuoteService:
             self._last_quote_completed = time.perf_counter()
         # 监控评估移出取数锁执行: 评估输入是本轮快照 (daily_df/quote_extra),
         # 离锁执行结果不变; 时序不变式 (enriched 替换后才评估) 仍由调用顺序保证。
-        if snapshot is not None:
+        # 暂停态跳过: 评估链含告警落盘/模拟盘写盘, 与管道存在同类竞态。
+        if snapshot is not None and not self._paused:
             with self._evaluate_lock:
                 self._evaluate_monitors(*snapshot)
         return updated
@@ -1141,7 +1146,16 @@ class QuoteService:
             return
 
         # 轮询放量状态更新 (volume_delta 规则的差值来源)
+        # 纯内存更新, 暂停态继续 (与 parquet 无关)
         self._update_volume_delta(stock_records, fetched_at)
+
+        # ---- 写盘段: 暂停态 (管道/数据修正运行中) 整段跳过 ----
+        # 防止实时行情与管道写同一批 parquet 竞态。拉取/缓存/SSE 已照常完成,
+        # 看板在管道运行期间持续有新行情; 管道结束后 resume, 下一轮恢复落盘。
+        if self._paused:
+            logger.info("行情轮询: 暂停态, 本轮跳过落盘 (管道/修正运行中)")
+            self._broadcast_quote_updated()
+            return
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
         daily_df = self._build_daily(stock_records)

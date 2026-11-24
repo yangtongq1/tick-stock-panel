@@ -579,7 +579,7 @@ export function Layout() {
   const realtimeStatusLabel = toggleQuote.isPending
     ? '正在更新'
     : isPaused
-      ? '同步期间暂停'
+      ? '运行中·暂停落盘'
       : realtimeActive
         ? '运行中'
         : realtimeEnabled
@@ -596,7 +596,7 @@ export function Layout() {
       ? 'bg-warning/70'
       : 'bg-muted'
   const realtimeToggleTitle = isPaused
-    ? '数据同步运行中，实时行情已临时暂停'
+    ? '数据同步运行中，行情正常更新、落盘暂缓（同步结束后自动恢复）'
     : toggleQuote.isPending
       ? '正在更新实时行情设置'
       : realtimeEnabled
@@ -1068,7 +1068,7 @@ export function Layout() {
                   </div>
                 )}
                 {isPaused && (
-                  <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
+                  <div className="text-warning/80">数据同步运行中，行情正常更新、落盘暂缓</div>
                 )}
               </div>
             )}

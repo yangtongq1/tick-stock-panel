@@ -57,7 +57,13 @@ def replace_with_retry(src: Path, dst: Path, *, attempts: int = 10, delay_s: flo
     分区 parquet 的读端 (polars scan_parquet / DuckDB read_parquet 视图) 在扫描进行
     期间持有句柄; Windows 不允许替换"仍被读端打开"的目标文件 (PermissionError,
     WinError 5), Linux 的 inode 交换语义则无此限制。读端扫描通常亚秒级完成,
-    短退避重试即可穿过并发读窗口; attempts 次仍被占用则原样抛出, 由上层记录失败。
+    短退避重试即可穿过并发读窗口。
+
+    attempts 次仍被占用时降级为原地覆写 (open(dst,'wb')): 读端通常以
+    FILE_SHARE_READ|FILE_SHARE_WRITE 打开文件 (DuckDB/polars 常态), 只阻塞
+    rename/unlink 修改目录项, 不阻塞共享写。覆写内容与 rename 语义等价
+    (调用方写完 src 才调本函数, 数据已完整), 读端最坏看到新旧完整版本之一。
+    覆写也失败 (读端独占写权限) 时才原样抛出, 由上层记录失败。
     """
     last: PermissionError | None = None
     for i in range(attempts):
@@ -75,6 +81,19 @@ def replace_with_retry(src: Path, dst: Path, *, attempts: int = 10, delay_s: flo
                 )
             if i < attempts - 1:
                 time.sleep(delay_s)
+    # 降级: 原地覆写穿透共享读句柄 (rename 被目录项锁挡住时仍可用)。
+    # 仅在目标已存在 (真实分区被读端占用) 时降级; 目标不存在意味着重试耗尽
+    # 也没能创建它 — 属于目录权限类硬错误, 原样抛出保持旧契约。
+    if dst.exists():
+        try:
+            data = src.read_bytes()
+            with open(dst, "wb") as w:
+                w.write(data)
+            src.unlink(missing_ok=True)
+            logger.warning("parquet rename 被长持有读句柄阻塞, 已降级原地覆写: %s", dst)
+            return
+        except OSError:
+            pass
     raise last  # type: ignore[misc]  # attempts >= 1 时 last 必已赋值
 
 
