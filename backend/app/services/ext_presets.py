@@ -207,6 +207,12 @@ def _zt_pool_preset(pool: str, config_id: str, label: str, extra_fields: list[tu
             schedule_minutes=30,
             schedule_trading_only=True,
             time_field="__pull_ts__",
+            # 交易时段门控: 东财接口非交易时段返回前一交易日池, append 模式下
+            # 会把昨日池混入当日分区 (2026-11-24 事故: 00:25-08:32 共 19 批
+            # 每批 146 行 11-23 污染 11-24 分区, 4304 行里 2774 行是垃圾)。
+            # 收盘后留 15:00-15:10 一段拉收盘定版池。
+            time_window_start="09:20",
+            time_window_end="15:10",
             date_param="date",
             date_format="compact",
             enabled=True,
@@ -257,6 +263,9 @@ def _fund_flow_preset() -> ExtConfig:
             schedule_minutes=30,
             schedule_trading_only=True,
             time_field="__pull_ts__",
+            # 同 zt_pool: 快照接口非交易时段返回旧值, 限交易时段 (含收盘定版)。
+            time_window_start="09:20",
+            time_window_end="15:10",
             enabled=True,
         ),
     )
@@ -292,6 +301,9 @@ def _fund_flow_board_preset() -> ExtConfig:
             schedule_minutes=30,
             schedule_trading_only=True,
             time_field="__pull_ts__",
+            # 同 zt_pool: 快照接口非交易时段返回旧值, 限交易时段 (含收盘定版)。
+            time_window_start="09:20",
+            time_window_end="15:10",
             enabled=True,
         ),
     )
@@ -365,6 +377,14 @@ _RETIRED_FACTORY_PULLS: dict[str, tuple[dict, ...]] = {
         {"url": "https://shy313.com/api/plugins/market_flow/exports/ths-industries"},
         {"url": f"{_FUYAO_BASE}{_FUYAO_CATALOG_PATH}?tag=industry"},
     ),
+    # 2026-11-25 前的涨停三池/资金流配方: 无 time_window, 非交易时段批次把
+    # 前一交易日池混入当日分区 (连板梯队错乱根因)。URL 未改过即视为出厂值,
+    # 启动时替换为带交易时段门控的当前配方。
+    "ext_zt_pool": ({"url": _aksource_zt_url("zt")},),
+    "ext_zb_pool": ({"url": _aksource_zt_url("zb")},),
+    "ext_dt_pool": ({"url": _aksource_zt_url("dt")},),
+    "ext_fund_flow": ({"url": "http://127.0.0.1:3021/fund_flow?kind=stock&num=1000"},),
+    "ext_fund_flow_board": ({"url": "http://127.0.0.1:3021/fund_flow?kind=hangye"},),
 }
 # 出厂 description 前缀 (历代文案) — 命中则同步为当前文案, 用户自定义描述不动
 _FACTORY_DESC_PREFIXES = (

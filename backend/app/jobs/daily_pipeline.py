@@ -381,7 +381,7 @@ def run_now(
         written_daily = kline_sync.sync_and_persist_daily_batch(
             symbols_for_repair, repo, capset,
             start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            end_date=_dt.combine(today, _dt.time(23, 59, 59)),
             on_chunk_done=_daily_chunk_progress,
             failed_out=repair_failed_symbols,
         )
@@ -436,7 +436,7 @@ def run_now(
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
             start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            end_date=_dt.combine(today, _dt.time(23, 59, 59)),
             on_chunk_done=_daily_chunk_progress,
         )
         gap_days = (today - start_date).days
@@ -456,7 +456,7 @@ def run_now(
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
             start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            end_date=_dt.combine(today, _dt.time(23, 59, 59)),
             on_chunk_done=_daily_chunk_progress,
         )
         new_daily_days = 365
@@ -671,6 +671,12 @@ def run_now(
                     index_start = override_start_date
                 else:
                     index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
+                    # 最新分区常是当日盘中快照 (实时行情写的 close 是快照值,
+                    # 2026-11-24 事故: 上证 +0.32% vs 官方 +0.27%): 起点回退一天,
+                    # 让官方日线 re-pull 当日分区, merge-upsert 覆盖快照。
+                    # 窗口小时段成本可忽略 (指数/ETF 只有一小批 symbol)。
+                    if index_start == today:
+                        index_start -= _td(days=1)
                 if index_stale_day is not None and index_start > index_stale_day:
                     index_start = index_stale_day
 
@@ -682,7 +688,7 @@ def run_now(
                     repo,
                     capset,
                     start_date=_dt.combine(index_start, _dt.min.time()),
-                    end_date=_dt.combine(today, _dt.min.time()),
+                    end_date=_dt.combine(today, _dt.time(23, 59, 59)),
                     on_chunk_done=_index_chunk,
                 )
                 emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
@@ -728,6 +734,9 @@ def run_now(
                     etf_start = override_start_date
                 else:
                     etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
+                    # 同指数: 最新分区是当日盘中快照时回退一天, 让官方日线覆盖。
+                    if etf_start == today:
+                        etf_start -= _td(days=1)
                 # 同指数: 完整性修复时把 ETF 起点提前到最早坏日
                 if etf_stale_day is not None and etf_start > etf_stale_day:
                     etf_start = etf_stale_day
@@ -740,7 +749,7 @@ def run_now(
                     repo,
                     capset,
                     start_date=_dt.combine(etf_start, _dt.min.time()),
-                    end_date=_dt.combine(today, _dt.min.time()),
+                    end_date=_dt.combine(today, _dt.time(23, 59, 59)),
                     on_chunk_done=_etf_chunk,
                 )
                 emit("sync_index", 88, f"ETF 日K完成,{written_etf_daily} 行")

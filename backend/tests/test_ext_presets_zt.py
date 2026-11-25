@@ -45,12 +45,38 @@ def test_zt_pool_presets_ship_with_complete_pull() -> None:
         assert pull.time_field == "__pull_ts__", f"{cid} 缺少拉取时刻字段"
         # 仅交易日拉取 (非交易日东财返回旧日期数据, 不落盘)
         assert pull.schedule_trading_only, f"{cid} 必须仅交易日拉取"
+        # 交易时段门控 (2026-11-24 事故): 非交易时段东财返回前一交易日池,
+        # append 模式下混入当日分区 → 连板梯队错乱。窗口覆盖盘中 + 收盘定版。
+        assert pull.time_window_start == "09:20", f"{cid} 缺少交易时段窗口起点"
+        assert pull.time_window_end == "15:10", f"{cid} 缺少交易时段窗口终点"
         # 免鉴权
         assert pull.auth.get("type") == "none", f"{cid} 应为免鉴权"
         # 核心字段
         names = {f.name for f in preset.fields}
         for must in ("symbol", "股票代码", "股票简称", "连板数", "首次封板时间", "所属行业"):
             assert must in names, f"{cid} 缺少核心字段 {must}"
+
+
+def test_zt_pool_old_factory_recipe_migrated_to_time_window(tmp_path: Path) -> None:
+    """老库已有无窗口出厂配方 → 启动时替换为带交易时段门控的当前配方。
+
+    2026-11-25 前的出厂配方无 time_window (非交易时段批次污染当日分区),
+    URL 命中出厂指纹即整体迁移; 用户自定义过 URL 的不受影响。
+    """
+    store = ExtConfigStore(tmp_path)
+    # 先用当前 preset 安装, 再手工退回旧配方 (无窗口) 模拟线上存量
+    asyncio.run(ensure_builtin_presets(tmp_path))
+    old = store.get("ext_zt_pool")
+    assert old is not None and old.pull is not None
+    old.pull.time_window_start = None
+    old.pull.time_window_end = None
+    store.upsert(old)
+
+    asyncio.run(ensure_builtin_presets(tmp_path))
+    migrated = ExtConfigStore(tmp_path).get("ext_zt_pool")
+    assert migrated is not None and migrated.pull is not None
+    assert migrated.pull.time_window_start == "09:20", "旧出厂配方未被迁移为带窗口配方"
+    assert migrated.pull.time_window_end == "15:10"
 
 
 def test_zt_batch_seeding_on_fresh_install(tmp_path: Path) -> None:
