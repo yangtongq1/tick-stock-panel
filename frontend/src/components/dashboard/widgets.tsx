@@ -382,8 +382,10 @@ function latestGlobalRows(rows: Record<string, any>[]): Record<string, any>[] {
 
 export function GlobalMarketWidget() {
   const q = useQuery({
-    queryKey: ['ext-data-rows', 'ext_global', undefined, 200],
-    queryFn: () => api.extDataRows('ext_global', { limit: 200 }),
+    queryKey: ['ext-data-rows', 'ext_global', undefined, 200, '__pull_ts__:desc'],
+    // 时序表默认按 __pull_ts__ 升序分页, limit=200 截断后只剩最早批次(旧值);
+    // 显式按 __pull_ts__:desc 取最新批次在前, latestGlobalRows 去重才命中最新行情
+    queryFn: () => api.extDataRows('ext_global', { limit: 200, sort: '__pull_ts__:desc' }),
     refetchInterval: 60_000,
     // 挂后台的看板页关闭即停; 30 分钟调度写入后 EXT_DATA_QUERY_PREFIXES
     // 失效 'ext-data-rows', 这里 60s 轮询兜底
