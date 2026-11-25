@@ -303,10 +303,10 @@ export const DEFAULT_LAYOUT: DashboardItem[] = [
   { i: 'ladder', t: 'ladder', x: 9, y: 4, w: 3, h: 8 },
   { i: 'concept-rank', t: 'concept-rank', x: 0, y: 12, w: 4, h: 9 },
   { i: 'industry-rank', t: 'industry-rank', x: 4, y: 12, w: 4, h: 9 },
-  { i: 'monitor', t: 'monitor', x: 8, y: 12, w: 4, h: 22 },
+  { i: 'global', t: 'global', x: 8, y: 12, w: 4, h: 22 },
   { i: 'gainers', t: 'gainers', x: 0, y: 21, w: 2, h: 13 },
   { i: 'losers', t: 'losers', x: 2, y: 21, w: 2, h: 13 },
   { i: 'turnover', t: 'turnover', x: 4, y: 21, w: 2, h: 13 },
   { i: 'activity', t: 'activity', x: 6, y: 21, w: 2, h: 13 },
-  { i: 'global', t: 'global', x: 8, y: 21, w: 4, h: 13 },
+  { i: 'monitor', t: 'monitor', x: 8, y: 21, w: 4, h: 13 },
 ]

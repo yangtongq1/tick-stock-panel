@@ -1439,12 +1439,22 @@ def _parse_global_one(sym: str, name: str, group: str, body: str) -> dict | None
         return None
     parts = raw.split(",")
     if sym.startswith("gb_"):
-        # 名称,现价,涨跌幅,时间,涨跌额,昨收,开盘,最高,最低,...
+        # 名称,现价,涨跌幅,时间,涨跌额,开盘,最高,最低,52周高,52周低,...,[25]美东时间,[26]昨收,...
+        # 2026-11-25 实测校准: [5]=开盘 [6]=最高 [7]=最低 (旧映射 [5]昨收/[6]开盘/
+        # [7]最高/[8]最低 全错位 — [8] 实为 52 周高, 曾致"最低>最高"); 真实昨收
+        # 在 [26], 可用 现价-涨跌额 交叉验证 (50018.6992-423.39=49595.3086=[26] ✓)。
+        prev = _f(parts, 26)
+        px = _f(parts, 1)
+        if prev is None and px is not None and _f(parts, 4) is not None:
+            prev = round(px - _f(parts, 4), 4)  # 兜底: 现价-涨跌额 反推昨收
+        chg = _f(parts, 2)
+        if chg is None and px is not None and prev:
+            chg = round((px - prev) / prev * 100, 3)
         return {
             "名称": name, "分组": group,
-            "现价": _f(parts, 1), "涨跌幅": _f(parts, 2),
-            "昨收": _f(parts, 5), "开盘": _f(parts, 6),
-            "最高": _f(parts, 7), "最低": _f(parts, 8),
+            "现价": px, "涨跌幅": chg,
+            "昨收": prev, "开盘": _f(parts, 5),
+            "最高": _f(parts, 6), "最低": _f(parts, 7),
             "时间": parts[3] if len(parts) > 3 else "",
         }
     if sym.startswith("hf_"):
@@ -1460,7 +1470,9 @@ def _parse_global_one(sym: str, name: str, group: str, body: str) -> dict | None
             "时间": parts[6] if len(parts) > 6 else "",
         }
     if sym == "DINIW":
-        # 时间,现价,买价,卖价,?,最高,最低,?,昨收,名称,日期
+        # 时间,现价,买价,卖价,?,昨低?,最高,最低,昨收,名称,日期
+        # 2026-11-25 实测校准: [6]=日内最高 [7]=日内最低 [8]=昨收
+        # (旧映射 最高[5]/最低[6] 错位一档, [5] 实为前日低或买盘参考)
         prev = _f(parts, 8)
         px = _f(parts, 1)
         chg = (px - prev) / prev * 100 if px and prev else None
@@ -1468,7 +1480,7 @@ def _parse_global_one(sym: str, name: str, group: str, body: str) -> dict | None
             "名称": name, "分组": group,
             "现价": px, "涨跌幅": round(chg, 3) if chg is not None else None,
             "昨收": prev, "开盘": None,
-            "最高": _f(parts, 5), "最低": _f(parts, 6),
+            "最高": _f(parts, 6), "最低": _f(parts, 7),
             "时间": parts[0] if parts else "",
         }
     if sym.startswith("fx_s"):
