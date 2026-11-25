@@ -2092,8 +2092,20 @@ async def repair_daily(request: Request):
                 # 修正运行期间暂停实时行情, 防止覆写同一批 parquet 竞态
                 if qs:
                     with qs.paused():
-                        return run_repair_daily(repo, capset, start_date, on_progress=progress)
-                return run_repair_daily(repo, capset, start_date, on_progress=progress)
+                        result = run_repair_daily(repo, capset, start_date, on_progress=progress)
+                else:
+                    result = run_repair_daily(repo, capset, start_date, on_progress=progress)
+                # 修正落盘后必须重建 Polars 内存缓存 (对齐盘后管道
+                # _make_pipeline_then_refresh 的 finally 语义): repair 直调
+                # run_now, 不经管道包装, 落盘后 enriched/live_agg 内存缓存
+                # 仍停留在修复前世代 —— 连板梯队的 consec/prev_consec 会用旧链
+                # 计算, 3 板显示成 2 板 (2026-11-25 事故)。部分成功也刷新:
+                # 已落盘的分区同样需要进缓存。
+                try:
+                    repo.refresh_cache()
+                except Exception:  # noqa: BLE001 — 刷新失败不让已完成的修复任务标 failed
+                    logger.exception("repair_daily: cache refresh failed (data on disk is intact)")
+                return result
 
             try:
                 result = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
