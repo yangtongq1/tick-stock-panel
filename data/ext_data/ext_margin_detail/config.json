@@ -1,0 +1,67 @@
+{
+  "id": "ext_margin_detail",
+  "label": "两融明细",
+  "mode": "timeseries",
+  "description": "全市场个股融资融券余额 (东财 datacenter, 经 aksource 聚合; T+1 日更)",
+  "symbol_map": {},
+  "code_map": {},
+  "market_level": true,
+  "created_at": "2026-11-26T11:28:38.453371",
+  "updated_at": "2026-11-26T11:28:38.453571",
+  "fields": [
+    {
+      "name": "股票代码",
+      "dtype": "string",
+      "label": "股票代码"
+    },
+    {
+      "name": "股票简称",
+      "dtype": "string",
+      "label": "股票简称"
+    },
+    {
+      "name": "市场",
+      "dtype": "string",
+      "label": "市场"
+    },
+    {
+      "name": "日期",
+      "dtype": "string",
+      "label": "数据日期"
+    },
+    {
+      "name": "融资余额",
+      "dtype": "float",
+      "label": "融资余额"
+    },
+    {
+      "name": "融资买入额",
+      "dtype": "float",
+      "label": "融资买入额"
+    },
+    {
+      "name": "融资偿还额",
+      "dtype": "float",
+      "label": "融资偿还额"
+    },
+    {
+      "name": "融券余额",
+      "dtype": "float",
+      "label": "融券余额"
+    }
+  ],
+  "pull": {
+    "url": "http://127.0.0.1:3021/margin_detail",
+    "method": "GET",
+    "headers": {},
+    "body": null,
+    "response_path": "data",
+    "field_map": {},
+    "schedule_minutes": null,
+    "schedule_seconds": null,
+    "schedule_time": "21:30",
+    "enabled": true,
+    "time_field": "__pull_ts__",
+    "timeout_seconds": 120
+  }
+}

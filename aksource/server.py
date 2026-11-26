@@ -71,7 +71,11 @@ app = FastAPI(title="TSP Free Data Source (Sina HTTP)")
 
 SINA_KLINE = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    # 完整 UA: push2.eastmoney.com 会拒绝简短 UA (实测 rc:102 / 连接重置)
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "Referer": "https://finance.sina.com.cn",
 }
 
@@ -1311,7 +1315,19 @@ def _mf_stock_rows(num: int = 200) -> list[dict]:
 
 
 def _mf_board_rows(kind: str = "hangye") -> list[dict]:
-    """板块资金流排行 (行业/概念, 净流入降序)。"""
+    """板块资金流排行: 东财 push2 clist 主源 (496 板块), 新浪 fallback (48)。
+
+    东财 fs=m:90+t:2 为全部 A 股板块 (行业+概念统一), f62=主力净流入;
+    新浪源按 fenlei=hangye/gn 分类, 仅 48/100 板块 — 作为东财失败时的降级。
+    """
+    # ---- 东财主源 ----
+    try:
+        rows = _em_board_flow_rows()
+        if rows:
+            return rows
+    except Exception as e:  # noqa: BLE001
+        log.warning("东财板块资金流失败, 回退新浪: %s", e)
+    # ---- 新浪降级 (原实现) ----
     rows = _mf_get(
         "ssl_bkzj_bk",
         f"page=1&num=100&sort=netamount&asc=0&fenlei={kind}",
@@ -1336,6 +1352,61 @@ def _mf_board_rows(kind: str = "hangye") -> list[dict]:
             "净流入": _f("netamount"),
             "净流入率": _f("ratioamount"),
         })
+    return out
+
+
+def _em_board_flow_rows() -> list[dict]:
+    """东财板块资金流 (datacenter RPT_INDUSTRY_FUNDFLOW): 一级行业板块, 主力净流入降序。
+
+    2026-11-26 实测: push2 clist 接口对云服务器 IP 间歇性拒绝 (连发 3 页后重置),
+    datacenter-web 域稳定 → 改用此报表。当日未发布时逐日回退 (最多 7 自然日)。
+    字段映射 (与新浪源 ext_fund_flow_board 列对齐):
+      BOARD_CODE/BOARD_NAME/CHANGE_RATE/NET_INFLOW/NET_INFLOW_RATIO
+      SUPERDEAL_NET=超大单净流入, BIGDEAL_NET=大单净流入
+      流入/流出额 = 报表无对应字段 → 置 None (下游只消费净流入/率)
+    """
+    # 当日未发布 → 逐日回退最近有数据日
+    d = _dt_today()
+    raw: list[dict] = []
+    from datetime import timedelta
+
+    for back in range(8):
+        try_d = (
+            datetime.strptime(d, "%Y-%m-%d") - timedelta(days=back)
+        ).strftime("%Y-%m-%d")
+        try:
+            raw = _dc_get("RPT_INDUSTRY_FUNDFLOW", try_d, page_size=200, max_pages=3,
+                          sort_columns="BOARD_CODE")
+        except RuntimeError:
+            raw = []
+        if raw:
+            d = try_d
+            break
+    if not raw:
+        raise RuntimeError("东财板块资金流报表无数据")
+
+    out: list[dict] = []
+    for it in raw:
+        def _f(key: str):
+            v = it.get(key)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        out.append({
+            "板块代码": str(it.get("BOARD_CODE") or ""),
+            "板块名称": str(it.get("BOARD_NAME") or ""),
+            "平均价": None,
+            "平均涨跌幅": _f("CHANGE_RATE"),
+            "换手率": None,
+            "成交额": None,
+            "流入额": None,
+            "流出额": None,
+            "净流入": _f("NET_INFLOW"),
+            "净流入率": _f("NET_INFLOW_RATIO"),
+        })
+    out.sort(key=lambda x: -(x.get("净流入") or 0))
     return out
 
 
@@ -1552,6 +1623,343 @@ def global_market(refresh: bool = False) -> dict:
         if _GLOBAL_CACHE["rows"]:
             return {"data": _GLOBAL_CACHE["rows"], "stale": True}
     return {"data": [], "error": "新浪外围行情接口失败"}
+
+
+# ---------------------------------------------------------------------------
+# 龙虎榜 (东财 datacenter 免费公开): 个股榜单 + 买卖席位明细
+# 网络注: datacenter-web HTTPS 本地开发机可能不通, 云服务器直连稳定。
+# ---------------------------------------------------------------------------
+
+EM_DC_BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_DT_CACHE: dict[tuple[str, str], dict] = {}   # (kind, date) -> {"rows": ..., "last_ok": t}
+_DT_LOCK = threading.Lock()
+_DT_TTL_TODAY = 600.0       # 当日盘中 10 分钟 (榜单 15:30 后定稿)
+_DT_TTL_HISTORY = 3600.0 * 24  # 历史日不可变
+
+
+def _dt_today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _dc_get(report: str, date_iso: str, extra_filter: str = "", page_size: int = 500,
+            max_pages: int = 8, sort_columns: str = "SECURITY_CODE") -> list[dict]:
+    """东财 datacenter 分页拉取 (按交易日过滤)。失败抛 RuntimeError。
+
+    sort_columns: 报表的排序列 — 不同报表主键不同 (龙虎榜=SECURITY_CODE,
+    板块资金流=BOARD_CODE), 传错排序列东财返回空结果。
+    filter 值含引号/括号: requests 的 params 字典会把括号也编码 (%28%29),
+    东财不认; urllib 默认又不编码引号。实测东财认的形态是:
+      filter=(TRADE_DATE%3D%272026-11-25%27)  — = 和 ' 编码, 括号不编码。
+    所以这里手工构造 URL (quote 且 safe 含括号)。
+    """
+    from urllib.parse import quote
+
+    flt = f"(TRADE_DATE='{date_iso}')"
+    if extra_filter:
+        flt = f"{flt}{extra_filter}"
+    safe_chars = "()" + "'"
+    rows: list[dict] = []
+    for page in range(1, max_pages + 1):
+        url = (
+            f"{EM_DC_BASE}?reportName={report}&columns=ALL"
+            f"&pageSize={page_size}&pageNumber={page}"
+            f"&sortColumns={sort_columns}&sortTypes=1"
+            f"&filter={quote(flt, safe=safe_chars)}"
+        )
+        r = None
+        for attempt in range(3):
+            try:
+                r = _requests_mod.get(
+                    url,
+                    headers={**HEADERS, "Referer": "https://data.eastmoney.com/"},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    break
+            except _requests_exc:  # noqa: BLE001
+                pass
+            if attempt < 2:
+                time.sleep(0.6)
+        if r is None or r.status_code != 200:
+            raise RuntimeError(f"东财 datacenter 不可达 (report={report})")
+        try:
+            payload = r.json()
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"东财 datacenter 响应解析失败: {e}") from e
+        if payload.get("code") == 9501 and "不存在" in str(payload.get("message") or ""):
+            raise RuntimeError(f"东财报表不存在: {report}")
+        result = payload.get("result") or {}
+        batch = result.get("data") or []
+        rows.extend(batch)
+        pages = int(result.get("pages") or 0)
+        if page >= pages or not batch:
+            break
+    return rows
+
+
+def _dt_stock_rows(date_iso: str) -> list[dict]:
+    """龙虎榜个股榜单 → 中文列 (与 backend dragon_tiger 契约对齐)。
+
+    东财一次返回全部上榜类型 (含转债), 用 SECURITY_TYPE_CODE 过滤
+    (2026-11-26 实测取值):
+      058001001=A股个股 / 058001002=B股 / 060=可转债。
+    org 榜 = OPERATEDEPT 含"机构"的席位聚合。
+    """
+    raw = _dc_get("RPT_DAILYBILLBOARD_DETAILSNEW", date_iso)
+    # 同股多上榜类型合并 (按代码聚合, 净额取和)
+    agg: dict[str, dict] = {}
+    for it in raw:
+        stype = str(it.get("SECURITY_TYPE_CODE") or "")
+        if not stype.startswith("058001001"):  # 只保留 A 股个股
+            continue
+        code = str(it.get("SECURITY_CODE") or "")
+        if not code:
+            continue
+        row = {
+            "thscode": str(it.get("SECUCODE") or code),
+            "ticker": code,
+            "name": it.get("SECURITY_NAME_ABBR"),
+            "change": round((it.get("CHANGE_RATE") or 0) / 100.0, 6),
+            "net_value": it.get("BILLBOARD_NET_AMT"),
+            "net_rate": it.get("DEAL_NET_RATIO"),
+            "buy_value": it.get("BILLBOARD_BUY_AMT"),
+            "sell_value": it.get("BILLBOARD_SELL_AMT"),
+            "amount": it.get("BILLBOARD_DEAL_AMT"),
+            "explain": it.get("EXPLANATION"),
+            "reason_list": [x for x in [str(it.get("EXPLANATION") or "")] if x],
+        }
+        if code in agg:
+            prev = agg[code]
+            prev["net_value"] = (prev["net_value"] or 0) + (row["net_value"] or 0)
+            prev["buy_value"] = (prev["buy_value"] or 0) + (row["buy_value"] or 0)
+            prev["sell_value"] = (prev["sell_value"] or 0) + (row["sell_value"] or 0)
+            if row["explain"]:
+                prev["reason_list"].append(row["explain"])
+        else:
+            agg[code] = row
+    return list(agg.values())
+
+
+def _dt_seat_rows(date_iso: str) -> list[dict]:
+    """买卖席位明细 (buy/sell 两表合并 → 席位级聚合)。
+
+    返回席位行: 席位名/买入总额/卖出总额/净额/关联股票 rows。
+    机构席位 (OPERATEDEPT_NAME 含 '机构') 单独标记, 供 org 榜复用。
+    """
+    buy = _dc_get("RPT_BILLBOARD_DAILYDETAILSBUY", date_iso)
+    sell = _dc_get("RPT_BILLBOARD_DAILYDETAILSSELL", date_iso)
+    # (席位代码, 股票) → 买卖额
+    seats: dict[str, dict] = {}
+    for side, rows in (("buy", buy), ("sell", sell)):
+        for it in rows:
+            sk = str(it.get("OPERATEDEPT_CODE") or it.get("OPERATEDEPT_NAME") or "")
+            if not sk:
+                continue
+            code = str(it.get("SECURITY_CODE") or "")
+            s = seats.setdefault(sk, {
+                "seat": it.get("OPERATEDEPT_NAME"),
+                "is_org": "机构" in str(it.get("OPERATEDEPT_NAME") or ""),
+                "buy_total": 0.0, "sell_total": 0.0, "net": 0.0,
+                "stocks": {},
+            })
+            amt = float(it.get("BUY") or 0) if side == "buy" else float(it.get("SELL") or 0)
+            if side == "buy":
+                s["buy_total"] += amt
+            else:
+                s["sell_total"] += amt
+            st = s["stocks"].setdefault(code, {
+                "thscode": it.get("SECUCODE"), "ticker": code, "buy": 0.0, "sell": 0.0})
+            st["buy" if side == "buy" else "sell"] += amt
+    out = []
+    for s in seats.values():
+        s["net"] = s["buy_total"] - s["sell_total"]
+        s["stock_count"] = len(s["stocks"])
+        out.append(s)
+    out.sort(key=lambda x: -(x["net"] or 0))
+    return out
+
+
+@app.get("/dragon_tiger")
+def dragon_tiger(
+    date: str | None = None,
+    board: str = "all",
+    refresh: bool = False,
+) -> dict:
+    """龙虎榜 (东财 datacenter 免费源, 替代 fuyao)。
+
+    board: all=个股榜单 / org=机构席位视角 / hot_money=席位明细(游资榜)
+    date: YYYY-MM-DD, 缺省当日 (当日 15:30 前通常未发布 → 自动回退最近有数据日)
+    """
+    d = (date or "").strip()
+    if d:
+        s = re.sub(r"\D", "", d)
+        if len(s) == 8:
+            d = f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+        else:
+            return {"data": [], "error": "date 须为 YYYY-MM-DD"}
+    else:
+        d = _dt_today()
+    today = _dt_today()
+    explicit_date = bool(date)  # 显式指定日期不回退 (与回退日期区分)
+
+    kind = f"dt_{board}"
+    key = (kind, d)
+    if not refresh:
+        with _DT_LOCK:
+            st = _DT_CACHE.get(key)
+            ttl = _DT_TTL_TODAY if d == today else _DT_TTL_HISTORY
+            if st and time.time() - st["last_ok"] < ttl:
+                return {"data": st["rows"], "date": d, "board": board}
+
+    def _fetch_board(bd: str, dd: str) -> list[dict]:
+        if bd == "all":
+            return _dt_stock_rows(dd)
+        seats = _dt_seat_rows(dd)
+        if bd == "org":
+            return [s for s in seats if s["is_org"]]
+        return seats
+
+    from datetime import timedelta
+
+    try:
+        rows = _fetch_board(board, d)
+        # 当日无数据 (未发布) → 逐日回退最近有数据日 (最多 7 个自然日);
+        # 显式指定日期时不回退, 如实返回空 (调用方按 no_data 处理)
+        if not rows and not explicit_date:
+            for back in range(1, 8):
+                try_d = (
+                    datetime.strptime(d, "%Y-%m-%d") - timedelta(days=back)
+                ).strftime("%Y-%m-%d")
+                rows = _fetch_board(board, try_d)
+                if rows:
+                    d = try_d
+                    break
+    except RuntimeError as e:
+        with _DT_LOCK:
+            stale = _DT_CACHE.get(key)
+        if stale:
+            return {"data": stale["rows"], "date": d, "board": board, "stale": True}
+        return {"data": [], "error": str(e), "date": d, "board": board}
+
+    # 空结果不落缓存: 显式当日请求 (未发布) 的空结果若被缓存, 后续无日期
+    # 调用会命中毒缓存绕过回退逻辑 (2026-11-26 实测踩坑)
+    if rows:
+        key = (kind, d)
+        with _DT_LOCK:
+            _DT_CACHE[key] = {"rows": rows, "last_ok": time.time()}
+    log.info("dragon_tiger %s %s: %d rows", board, d, len(rows))
+    return {"data": rows, "date": d, "board": board}
+
+
+# ---------------------------------------------------------------------------
+# 两融明细 (东财 datacenter): 个股融资融券余额, T+1 日更
+# ---------------------------------------------------------------------------
+
+@app.get("/margin_detail")
+def margin_detail(
+    date: str | None = None,
+    refresh: bool = False,
+) -> dict:
+    """两融明细 (RPTA_WEB_RZRQ_GGMX): 全市场个股融资余额/融资买入额。
+
+    date: YYYY-MM-DD, 缺省当日 (T+1, 当日 20:00 前通常只有昨日数据)。
+    输出列: 股票代码/简称/市场/融资余额/融资买入额/融资偿还额/融券余额/标的
+    """
+    d = (date or "").strip()
+    if d:
+        s = re.sub(r"\D", "", d)
+        if len(s) == 8:
+            d = f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+        else:
+            return {"data": [], "error": "date 须为 YYYY-MM-DD"}
+    else:
+        d = _dt_today()
+    today = _dt_today()
+    explicit_date = bool(date)
+
+    key = ("margin", d)
+    if not refresh:
+        with _DT_LOCK:
+            st = _DT_CACHE.get(key)
+            if st and time.time() - st["last_ok"] < _DT_TTL_HISTORY:
+                return {"data": st["rows"], "date": d}
+
+    try:
+        # 2026-11-26 实测: 两融报表的日期列 DATE 可以直接 filter (与 TRADE_DATE
+        # 同形态编码), 按日过滤直拉比全量翻页扫描高效得多 (每日 ~4500 行)
+        from urllib.parse import quote
+        from datetime import timedelta
+
+        def _pull_margin(day_iso: str) -> list[dict]:
+            flt_m = "(DATE='" + day_iso + "')"
+            safe_m = "()" + "'"
+            got: list[dict] = []
+            for page in range(1, 11):
+                url = (
+                    f"{EM_DC_BASE}?reportName=RPTA_WEB_RZRQ_GGMX&columns=ALL"
+                    f"&pageSize=500&pageNumber={page}&sortColumns=DATE&sortTypes=-1"
+                    f"&filter={quote(flt_m, safe=safe_m)}"
+                )
+                r = None
+                for attempt in range(3):
+                    try:
+                        r = _requests_mod.get(url, headers={
+                            **HEADERS, "Referer": "https://data.eastmoney.com/"}, timeout=10)
+                        if r.status_code == 200:
+                            break
+                    except _requests_exc:  # noqa: BLE001
+                        pass
+                    if attempt < 2:
+                        time.sleep(0.6)
+                if r is None or r.status_code != 200:
+                    raise RuntimeError("东财两融接口不可达")
+                payload = r.json()
+                result = payload.get("result") or {}
+                batch = result.get("data") or []
+                for it in batch:
+                    code = str(it.get("SCODE") or "")
+                    if not code:
+                        continue
+                    got.append({
+                        "股票代码": code,
+                        "股票简称": it.get("SECNAME"),
+                        "市场": (it.get("MARKET") or "").replace("融资融券_", "") or None,
+                        "日期": day_iso,
+                        "融资余额": it.get("RZYE"),
+                        "融资买入额": it.get("RZMRE"),
+                        "融资偿还额": it.get("RZCHE"),
+                        "融券余额": it.get("RQYE"),
+                        "标的": it.get("TARGETS") or code,
+                    })
+                if page >= int(result.get("pages") or 1) or not batch:
+                    break
+            return got
+
+        rows = _pull_margin(d)
+        # 当日无数据 (T+1 未发布) → 回退最近有数据日 (最多 7 自然日);
+        # 显式指定日期不回退, 如实返回空
+        if not rows and not explicit_date:
+            for back in range(1, 8):
+                try_d = (
+                    datetime.strptime(d, "%Y-%m-%d") - timedelta(days=back)
+                ).strftime("%Y-%m-%d")
+                rows = _pull_margin(try_d)
+                if rows:
+                    d = try_d
+                    break
+    except RuntimeError as e:
+        with _DT_LOCK:
+            stale = _DT_CACHE.get(key)
+        if stale:
+            return {"data": stale["rows"], "date": d, "stale": True}
+        return {"data": [], "error": str(e), "date": d}
+
+    # 空结果不落缓存 (与 dragon_tiger 同理: 防当日未发布的毒缓存)
+    if rows:
+        with _DT_LOCK:
+            _DT_CACHE[("margin", d)] = {"rows": rows, "last_ok": time.time()}
+    log.info("margin_detail %s: %d rows", d, len(rows))
+    return {"data": rows, "date": d}
 
 
 @app.on_event("startup")

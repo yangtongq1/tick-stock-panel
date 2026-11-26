@@ -75,6 +75,141 @@ def _provider():
     return custom_sources.get_provider("fuyao")
 
 
+# ---------------------------------------------------------------------------
+# aksource 免费源降级 (东财 datacenter): fuyao 未配置时的兜底通道。
+# 复盘页龙虎榜卡片不再硬依赖商业源; 三榜数据契约与 fuyao 版完全一致。
+# ---------------------------------------------------------------------------
+AKSOURCE_DEFAULT = "http://127.0.0.1:3021"
+
+
+def _aksource_base() -> str:
+    """aksource 地址: 环境变量可覆盖, 默认本机 3021。"""
+    import os
+
+    return os.environ.get("AKSOURCE_URL", AKSOURCE_DEFAULT).rstrip("/")
+
+
+class _AksourceError(RuntimeError):
+    pass
+
+
+def _aksource_dt(board: str, iso: str | None) -> dict:
+    """调 aksource /dragon_tiger 单榜。失败抛 _AksourceError。
+
+    返回结构对齐 _boards_of 的 fuyao 契约:
+      {trade_date, stock_count, count, stock_items, hot_money_items}
+
+    HTTP 用 stdlib urllib (backend venv 无 requests, aksource 同机 127.0.0.1)。
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = f"{_aksource_base()}/dragon_tiger?board={board}"
+    if iso:
+        url += f"&date={urllib.parse.quote(iso)}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 - urllib 异常族太杂, 统一收敛
+        raise _AksourceError(f"aksource 不可达: {e}") from e
+    if payload.get("error"):
+        raise _AksourceError(str(payload["error"]))
+    rows = payload.get("data") or []
+    trade_date = str(payload.get("date") or "") or None
+
+    if board == "hot_money":
+        # 席位行 → hot_money_items 契约 (seat/rows 关联股)
+        hot_money_items = []
+        for s in rows:
+            stocks = s.get("stocks") or {}
+            sub_rows = []
+            for code, st in stocks.items():
+                sub_rows.append({
+                    "thscode": st.get("thscode") or code,
+                    "ticker": code,
+                    "name": None,
+                    "net_value": (st.get("buy") or 0) - (st.get("sell") or 0),
+                    "buy_value": st.get("buy"),
+                    "sell_value": st.get("sell"),
+                    "hot_money_item_net_value": (st.get("buy") or 0) - (st.get("sell") or 0),
+                })
+            sub_rows.sort(key=lambda x: -(x.get("hot_money_item_net_value") or 0))
+            hot_money_items.append({
+                "seat_name": s.get("seat"),
+                "is_org": bool(s.get("is_org")),
+                "net_value": s.get("net"),
+                "buy_value": s.get("buy_total"),
+                "sell_value": s.get("sell_total"),
+                "stock_count": s.get("stock_count"),
+                "rows": sub_rows,
+            })
+        return {
+            "trade_date": trade_date,
+            "count": len(hot_money_items),
+            "hot_money_items": hot_money_items,
+        }
+
+    # all / org 股票榜: org 视角 = 席位明细中机构席位的关联股聚合
+    if board == "all":
+        stock_items = [_ak_row_to_item(r) for r in rows]
+        return {
+            "trade_date": trade_date,
+            "stock_count": len(stock_items),
+            "count": len(stock_items),
+            "stock_items": stock_items,
+        }
+    # org: 从席位数据推导机构视角 (aksource org board 返回机构席位行)
+    org_items_map: dict[str, dict] = {}
+    for s in rows:
+        if not s.get("is_org"):
+            continue
+        stocks = s.get("stocks") or {}
+        for code, st in stocks.items():
+            net = (st.get("buy") or 0) - (st.get("sell") or 0)
+            it = org_items_map.setdefault(code, {
+                "thscode": st.get("thscode") or code,
+                "ticker": code,
+                "name": None,
+                "org_net_value": 0.0,
+                "org_buy_num": 0,
+                "org_sell_num": 0,
+                "buy_value": 0.0,
+                "sell_value": 0.0,
+                "net_value": 0.0,
+            })
+            it["org_net_value"] = (it["org_net_value"] or 0) + net
+            it["net_value"] = (it["net_value"] or 0) + net
+            if (st.get("buy") or 0) > 0:
+                it["org_buy_num"] = (it["org_buy_num"] or 0) + 1
+                it["buy_value"] = (it["buy_value"] or 0) + (st.get("buy") or 0)
+            if (st.get("sell") or 0) > 0:
+                it["org_sell_num"] = (it["org_sell_num"] or 0) + 1
+                it["sell_value"] = (it["sell_value"] or 0) + (st.get("sell") or 0)
+    org_items = sorted(org_items_map.values(), key=lambda x: -(x.get("org_net_value") or 0))
+    return {
+        "trade_date": trade_date,
+        "stock_count": len(org_items),
+        "count": len(org_items),
+        "stock_items": org_items,
+    }
+
+
+def _ak_row_to_item(r: dict) -> dict:
+    """aksource all 榜行 → fuyao stock_item 契约 (字段名对齐)。"""
+    return {
+        "thscode": r.get("thscode"),
+        "ticker": r.get("ticker"),
+        "name": r.get("name"),
+        "change": r.get("change"),
+        "net_value": r.get("net_value"),
+        "net_rate": r.get("net_rate"),
+        "buy_value": r.get("buy_value"),
+        "sell_value": r.get("sell_value"),
+        "reason_list": r.get("reason_list") or [],
+    }
+
+
 def _fetch_boards(provider, d: date_cls) -> dict:
     """三榜取齐。任一榜失败抛 FuyaoError (整日失败, 不留半套缓存)。"""
     return {
@@ -221,7 +356,29 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
 
     provider = _provider()
     if provider is None:
-        return {"state": "source_unavailable"}
+        # fuyao 未配置 → aksource 免费源降级 (东财 datacenter)。
+        # 契约与 fuyao 版一致; 当日未发布时 aksource 内部已回退最近有数据日。
+        # 注意: 当日 (target>=today) 不能显式传日期 — aksource 对显式日期
+        # 如实返回空 (当日未发布), 需让它自动回退最近有数据日。
+        try:
+            iso_arg = trade_date.isoformat() if trade_date else None
+            if trade_date is not None and trade_date >= today:
+                iso_arg = None  # 当日 → 让 aksource 自行回退到最近已发布日
+            all_b = _aksource_dt("all", iso_arg)
+            org_b = _aksource_dt("org", all_b.get("trade_date"))
+            hm_b = _aksource_dt("hot_money", all_b.get("trade_date"))
+        except _AksourceError as e:
+            return {"state": "no_data", "message": str(e)}
+        payload = {
+            "state": "ok",
+            "requested_date": trade_date.isoformat() if trade_date else None,
+            "trade_date": all_b.get("trade_date"),
+            "all": all_b,
+            "org": org_b,
+            "hot_money": hm_b,
+            "source": "aksource",
+        }
+        return normalize_payload(payload)
 
     from app.plugins.fuyao.client import FuyaoError
 
