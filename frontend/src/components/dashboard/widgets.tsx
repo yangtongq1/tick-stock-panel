@@ -17,7 +17,7 @@ import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
 import { toNavItems, type NavItem } from '@/lib/listNav'
-import { fmtPrice, fmtIndexPct, fmtStockPct, pctClass, scoreColor as scoreColorValue, SectionTitle } from './shared'
+import { fmtPrice, fmtIndexPct, fmtStockPct, pctClass, scoreColor as scoreColorValue, SectionTitle, MiniMetric } from './shared'
 
 // 切股导航列表构建 (与列表展示行一致: StockList 只显示前 8)
 export function stockListNav(rows: MarketSnapshotRow[]): NavItem[] {
@@ -602,5 +602,291 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
         })}
       </div>
     </>
+  )
+}
+
+// ===== 板块资金流排行 (ext_fund_flow_board, 30min 粒度) =====
+// 与概念/行业热度(价格维度)互补的资金维度: 净流入/流出 Top 板块红绿条形。
+/** 同名板块保留 __pull_ts__ 最新一行 (一次拉多批时去重) */
+function latestRowsByName(rows: Record<string, any>[], nameKey = '板块名称'): Record<string, any>[] {
+  const seen = new Map<string, Record<string, any>>()
+  for (const r of rows) {
+    const key = String(r[nameKey] ?? '')
+    if (!key) continue
+    const prev = seen.get(key)
+    if (!prev || String(r['__pull_ts__'] ?? '') >= String(prev['__pull_ts__'] ?? '')) seen.set(key, r)
+  }
+  return [...seen.values()]
+}
+
+/** 净流入额(元)格式化: 亿/万 */
+function fmtFlow(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  const abs = Math.abs(v)
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(0)}万`
+  return v.toFixed(0)
+}
+
+export function BoardFlowWidget() {
+  const q = useQuery({
+    queryKey: ['ext-data-rows', 'ext_fund_flow_board', undefined, 1000, '__pull_ts__:desc'],
+    queryFn: () => api.extDataRows('ext_fund_flow_board', { limit: 1000, sort: '__pull_ts__:desc' }),
+    refetchInterval: 120_000,
+  })
+  const rows = latestRowsByName(q.data?.rows ?? [])
+  const withFlow = rows.filter(r => typeof r['净流入'] === 'number')
+  const sorted = [...withFlow].sort((a, b) => (b['净流入'] as number) - (a['净流入'] as number))
+  const inflow = sorted.slice(0, 8)
+  const outflow = sorted.slice(-6).reverse()
+  const maxAbs = Math.max(1, ...withFlow.map(r => Math.abs(r['净流入'] as number)))
+  const lastTs = rows.reduce<string>((m, r) => {
+    const t = String(r['__pull_ts__'] ?? '')
+    return t > m ? t : m
+  }, '')
+
+  if (q.isLoading) {
+    return <div className="flex h-full min-h-24 items-center justify-center text-[11px] text-muted">加载板块资金流…</div>
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center">
+        <p className="text-[11px] text-muted">暂无板块资金流数据</p>
+        <p className="text-[10px] text-muted/70">需启用扩展表 <span className="font-mono">ext_fund_flow_board</span></p>
+      </div>
+    )
+  }
+
+  const bar = (r: Record<string, any>, positive: boolean) => {
+    const v = r['净流入'] as number
+    const w = Math.max(2, Math.round(Math.abs(v) / maxAbs * 100))
+    const pct = typeof r['净流入率'] === 'number' ? r['净流入率'] : null
+    return (
+      <div key={String(r['板块名称'])} className="min-w-0">
+        <div className="flex items-baseline justify-between gap-1">
+          <span className="truncate text-[10px] text-foreground">{r['板块名称']}</span>
+          <span className={`shrink-0 font-mono text-[10px] font-semibold ${pctClass(pct)}`}>{fmtFlow(v)}</span>
+        </div>
+        <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-elevated/60">
+          <div
+            className={positive ? 'h-full rounded-full bg-bull/70' : 'h-full rounded-full bg-bear/70'}
+            style={{ width: `${w}%` }}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="mb-1 text-[10px] font-medium text-bull">净流入</div>
+        <div className="space-y-1.5">{inflow.map(r => bar(r, true))}</div>
+      </div>
+      {outflow.length > 0 && (
+        <div className="pt-1 border-t border-border/60">
+          <div className="mb-1 text-[10px] font-medium text-bear">净流出</div>
+          <div className="space-y-1.5">{outflow.map(r => bar(r, false))}</div>
+        </div>
+      )}
+      {lastTs && (
+        <div className="pt-0.5 text-right text-[9px] text-muted/50">拉取 {lastTs.replace('T', ' ').slice(5, 16)}</div>
+      )}
+    </div>
+  )
+}
+
+// ===== 外围行情分时走势 (ext_global 当日 2 分钟批次) =====
+// 复用 GlobalMarketWidget 已落盘的当日批次画 sparkline; 全量一次拉
+// (今日 ~5000 行, limit 20000 内), 90s 轮询。
+const _GLOBAL_TREND_SYMBOLS = ['富时A50期货', '恒生指数', 'COMEX黄金', '道琼斯'] as const
+
+/** SVG sparkline: 归一化折线 + 尾点 */
+function Sparkline({ values, positive }: { values: number[]; positive: boolean }) {
+  if (values.length < 2) return <div className="h-6" />
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const w = 100
+  const h = 24
+  const pts = values.map((v, i) => `${(i / (values.length - 1) * w).toFixed(1)},${(h - 2 - (v - min) / span * (h - 4)).toFixed(1)}`)
+  const color = positive ? 'var(--color-bull, #ef4444)' : 'var(--color-bear, #22c55e)'
+  const last = pts[pts.length - 1].split(',')
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-6 w-full" preserveAspectRatio="none">
+      <polyline
+        points={pts.join(' ')}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.2"
+        vectorEffect="non-scaling-stroke"
+      />
+      <circle cx={last[0]} cy={last[1]} r="1.6" fill={color} vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
+export function GlobalTrendWidget() {
+  const q = useQuery({
+    queryKey: ['ext-data-rows', 'ext_global', 'trend', 20000],
+    queryFn: () => api.extDataRows('ext_global', { limit: 20000, sort: '__pull_ts__:desc' }),
+    refetchInterval: 90_000,
+  })
+  const rows = q.data?.rows ?? []
+  // 按名称归组, 时间升序排好当日走势
+  const series = new Map<string, { t: string[]; v: number[] }>()
+  for (const r of rows) {
+    const name = String(r['名称'] ?? '')
+    const px = r['现价']
+    const ts = String(r['__pull_ts__'] ?? '')
+    if (!name || typeof px !== 'number' || !ts) continue
+    if (!_GLOBAL_TREND_SYMBOLS.includes(name as never)) continue
+    const s = series.get(name) ?? { t: [], v: [] }
+    s.t.push(ts)
+    s.v.push(px)
+    series.set(name, s)
+  }
+
+  if (q.isLoading) {
+    return <div className="flex h-full min-h-24 items-center justify-center text-[11px] text-muted">加载分时走势…</div>
+  }
+  if (series.size === 0) {
+    return (
+      <div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center">
+        <p className="text-[11px] text-muted">暂无外围行情分时数据</p>
+        <p className="text-[10px] text-muted/70">需启用扩展表 <span className="font-mono">ext_global</span> (2 分钟调度)</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {_GLOBAL_TREND_SYMBOLS.filter(n => series.has(n)).map(name => {
+        const s = series.get(name)!
+        const first = s.v[0]
+        const last = s.v[s.v.length - 1]
+        const chg = first ? (last - first) / first * 100 : null
+        return (
+          <div key={name} className="rounded-md border border-border/40 bg-elevated/40 px-1.5 py-1">
+            <div className="flex items-baseline justify-between gap-1">
+              <span className="truncate text-[10px] text-foreground">{name}</span>
+              <div className="flex items-baseline gap-1.5 font-mono">
+                <span className="text-[11px] text-foreground">{fmtPrice(last)}</span>
+                <span className={`text-[10px] font-semibold ${pctClass(chg)}`}>
+                  {chg == null ? '—' : `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`}
+                </span>
+              </div>
+            </div>
+            <Sparkline values={s.v} positive={(chg ?? 0) >= 0} />
+            <div className="flex justify-between text-[8px] text-muted/50 font-mono">
+              <span>{s.t[0]?.slice(11, 16)}</span>
+              <span>{s.t[s.t.length - 1]?.slice(11, 16)}</span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ===== 亏钱效应监控 (zt/dt/zb 三池聚合) =====
+// 情绪雷达的反面: 涨停/跌停比、炸板率、炸板数 — 数值越差越要防守。
+export function LossSentimentWidget() {
+  const q = useQuery({
+    queryKey: ['ext-data-rows', 'zt-dt-zb', 'latest'],
+    queryFn: async () => {
+      const [zt, dt, zb] = await Promise.all([
+        api.extDataRows('ext_zt_pool', { limit: 500, sort: '__pull_ts__:desc' }),
+        api.extDataRows('ext_dt_pool', { limit: 500, sort: '__pull_ts__:desc' }),
+        api.extDataRows('ext_zb_pool', { limit: 500, sort: '__pull_ts__:desc' }),
+      ])
+      return { zt, dt, zb }
+    },
+    refetchInterval: 120_000,
+  })
+  const latestCount = (d?: { rows: Record<string, any>[] }) => {
+    const rows = d?.rows ?? []
+    if (rows.length === 0) return { count: 0, ts: '' }
+    const latest = String(rows[0]['__pull_ts__'] ?? '')
+    const batch = rows.filter(r => String(r['__pull_ts__'] ?? '') === latest)
+    return { count: batch.length, ts: latest }
+  }
+  const zt = latestCount(q.data?.zt)
+  const dt = latestCount(q.data?.dt)
+  const zb = latestCount(q.data?.zb)
+  const total = zt.count + dt.count
+  // 涨停占比(涨跌停比): >0.7 偏多头, <0.5 亏钱效应明显
+  const ztRatio = total > 0 ? zt.count / total : null
+  // 炸板率: 炸板 / (涨停 + 炸板), >0.4 说明封板质量差
+  const sealedPlusBroken = zt.count + zb.count
+  const brokenRate = sealedPlusBroken > 0 ? zb.count / sealedPlusBroken : null
+  const tone = (v: number | null, good: number, bad: number) =>
+    v == null ? 'text-muted' : v >= good ? 'text-bull' : v <= bad ? 'text-bear' : 'text-warning'
+
+  if (q.isLoading) {
+    return <div className="flex h-full min-h-24 items-center justify-center text-[11px] text-muted">加载亏钱效应…</div>
+  }
+  if (total === 0 && zb.count === 0) {
+    return (
+      <div className="flex h-full min-h-24 flex-col items-center justify-center gap-1 text-center">
+        <p className="text-[11px] text-muted">暂无涨跌停池数据</p>
+        <p className="text-[10px] text-muted/70">需启用扩展表 <span className="font-mono">ext_zt_pool / ext_dt_pool / ext_zb_pool</span></p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-3 gap-1.5">
+        <MiniMetric label="涨停" value={`${zt.count}`} cls="text-bull" />
+        <MiniMetric label="跌停" value={`${dt.count}`} cls="text-bear" />
+        <MiniMetric label="炸板" value={`${zb.count}`} cls="text-warning" />
+      </div>
+      <div className="space-y-1.5">
+        <div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-[10px] text-muted">涨停占比 (涨/(涨+跌停))</span>
+            <span className={`font-mono text-[11px] font-semibold ${tone(ztRatio, 0.7, 0.5)}`}>
+              {ztRatio == null ? '—' : `${(ztRatio * 100).toFixed(0)}%`}
+            </span>
+          </div>
+          <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-elevated/60">
+            <div
+              className={`h-full rounded-full ${ztRatio != null && ztRatio >= 0.7 ? 'bg-bull/70' : ztRatio != null && ztRatio <= 0.5 ? 'bg-bear/70' : 'bg-warning/70'}`}
+              style={{ width: `${Math.round((ztRatio ?? 0) * 100)}%` }}
+            />
+          </div>
+        </div>
+        <div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-[10px] text-muted">炸板率 (炸/(涨+炸))</span>
+            <span className={`font-mono text-[11px] font-semibold ${brokenRate != null && brokenRate <= 0.25 ? 'text-bull' : brokenRate != null && brokenRate >= 0.45 ? 'text-bear' : 'text-warning'}`}>
+              {brokenRate == null ? '—' : `${(brokenRate * 100).toFixed(0)}%`}
+            </span>
+          </div>
+          <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-elevated/60">
+            <div
+              className={`h-full rounded-full ${brokenRate != null && brokenRate <= 0.25 ? 'bg-bull/70' : brokenRate != null && brokenRate >= 0.45 ? 'bg-bear/70' : 'bg-warning/70'}`}
+              style={{ width: `${Math.round((brokenRate ?? 0) * 100)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5">
+        <MiniMetric
+          label="状态"
+          value={ztRatio == null ? '—' : ztRatio >= 0.7 ? '偏多头' : ztRatio <= 0.5 ? '亏钱效应' : '中性'}
+          cls={tone(ztRatio, 0.7, 0.5)}
+        />
+        <MiniMetric
+          label="封板质量"
+          value={brokenRate == null ? '—' : brokenRate <= 0.25 ? '良好' : brokenRate >= 0.45 ? '差' : '一般'}
+          cls={brokenRate != null && brokenRate <= 0.25 ? 'text-bull' : brokenRate != null && brokenRate >= 0.45 ? 'text-bear' : 'text-warning'}
+        />
+      </div>
+      {zt.ts && (
+        <div className="text-right text-[9px] text-muted/50">快照 {zt.ts.replace('T', ' ').slice(5, 16)}</div>
+      )}
+    </div>
   )
 }

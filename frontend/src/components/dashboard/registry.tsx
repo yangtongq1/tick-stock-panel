@@ -8,7 +8,7 @@ import type { CSSProperties } from 'react'
 import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, BarChart3, BellRing, Flame, Gauge, Globe, LineChart, Link2, Sparkles, Target, TrendingUp, TrendingDown, Coins, Repeat } from 'lucide-react'
+import { ArrowUpRight, BarChart3, BellRing, Flame, Gauge, Globe, LineChart, Link2, Sparkles, Target, TrendingUp, TrendingDown, Coins, Repeat, DollarSign, ShieldAlert } from 'lucide-react'
 import type { AlertEvent, OverviewMarket } from '@/lib/api'
 import { fmtBigNum } from '@/lib/format'
 import type { DimensionMembersTarget } from '@/components/DimensionMembersDialog'
@@ -17,6 +17,7 @@ import { scoreColor, fmtPrice, fmtStockPct, pctClass, compactCount, SectionTitle
 import { EmotionScoreConfigDialog } from './EmotionScoreConfigDialog'
 import {
   IndexTicker, BreadthBar, DistributionBars, EmotionRadar, LadderMini, StockList, HotRankCard, MonitorWidget, GlobalMarketWidget,
+  BoardFlowWidget, GlobalTrendWidget, LossSentimentWidget,
   stockListNav, rankNav,
 } from './widgets'
 import type { DashboardItem, WidgetType } from './layout'
@@ -274,6 +275,37 @@ export const WIDGET_DEFS: WidgetDef[] = [
       </>,
     ),
   },
+  {
+    id: 'board-flow', label: '板块资金流', icon: DollarSign, minW: 3, minH: 6, defW: 4, defH: 9,
+    render: () => sectionCard(
+      <>
+        <SectionTitle icon={DollarSign} title="板块资金流" hint="净流入/流出 Top" />
+        <div className="max-h-full overflow-y-auto">
+          <BoardFlowWidget />
+        </div>
+      </>,
+    ),
+  },
+  {
+    id: 'global-trend', label: '外围分时', icon: LineChart, minW: 3, minH: 5, defW: 4, defH: 9,
+    render: () => sectionCard(
+      <>
+        <SectionTitle icon={LineChart} title="外围分时" hint="当日 2 分钟线" />
+        <div className="max-h-full overflow-y-auto">
+          <GlobalTrendWidget />
+        </div>
+      </>,
+    ),
+  },
+  {
+    id: 'loss-sentiment', label: '亏钱效应', icon: ShieldAlert, minW: 3, minH: 5, defW: 4, defH: 8,
+    render: () => sectionCard(
+      <>
+        <SectionTitle icon={ShieldAlert} title="亏钱效应" hint="涨跌停比/炸板率" />
+        <LossSentimentWidget />
+      </>,
+    ),
+  },
 ]
 
 const _DEF_INDEX = new Map(WIDGET_DEFS.map(d => [d.id, d]))
@@ -301,12 +333,15 @@ export const DEFAULT_LAYOUT: DashboardItem[] = [
   { i: 'radar', t: 'radar', x: 3, y: 4, w: 3, h: 8 },
   { i: 'trend', t: 'trend', x: 6, y: 4, w: 3, h: 8 },
   { i: 'ladder', t: 'ladder', x: 9, y: 4, w: 3, h: 8 },
-  { i: 'concept-rank', t: 'concept-rank', x: 0, y: 12, w: 4, h: 9 },
-  { i: 'industry-rank', t: 'industry-rank', x: 4, y: 12, w: 4, h: 9 },
+  { i: 'loss-sentiment', t: 'loss-sentiment', x: 0, y: 12, w: 4, h: 9 },
+  { i: 'board-flow', t: 'board-flow', x: 4, y: 12, w: 4, h: 9 },
+  { i: 'concept-rank', t: 'concept-rank', x: 0, y: 21, w: 4, h: 9 },
+  { i: 'industry-rank', t: 'industry-rank', x: 4, y: 21, w: 4, h: 9 },
   { i: 'global', t: 'global', x: 8, y: 12, w: 4, h: 22 },
-  { i: 'gainers', t: 'gainers', x: 0, y: 21, w: 2, h: 13 },
-  { i: 'losers', t: 'losers', x: 2, y: 21, w: 2, h: 13 },
-  { i: 'turnover', t: 'turnover', x: 4, y: 21, w: 2, h: 13 },
-  { i: 'activity', t: 'activity', x: 6, y: 21, w: 2, h: 13 },
-  { i: 'monitor', t: 'monitor', x: 8, y: 21, w: 4, h: 13 },
+  { i: 'global-trend', t: 'global-trend', x: 8, y: 34, w: 4, h: 10 },
+  { i: 'gainers', t: 'gainers', x: 0, y: 30, w: 2, h: 13 },
+  { i: 'losers', t: 'losers', x: 2, y: 30, w: 2, h: 13 },
+  { i: 'turnover', t: 'turnover', x: 4, y: 30, w: 2, h: 13 },
+  { i: 'activity', t: 'activity', x: 6, y: 30, w: 2, h: 13 },
+  { i: 'monitor', t: 'monitor', x: 8, y: 44, w: 4, h: 13 },
 ]
