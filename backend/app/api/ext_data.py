@@ -1772,3 +1772,13 @@ def _refresh_views(request: Request) -> None:
     # 帧, 必须一并清理, 否则写入后监控/列表仍用旧值 (服务层已清扩展帧与策略缓存)。
     if hasattr(repo, "clear_cache"):
         repo.clear_cache()
+        # clear_cache 会一并清掉 live_agg (盘中递推状态, 含昨日连板数 _prev_consec_*)。
+        # 若无人重建, 实时增量路径 use_incremental 判定失败 → 全量路径以"当日从零
+        # 起算"口径覆盖 enriched 缓存, 连板天梯退化为只剩 1 板 (2026-11-26 踩坑)。
+        # 触发后台预热重建 (instruments + enriched + live_agg); 已有线程在跑则自动跳过。
+        refresh = getattr(repo, "refresh_cache", None)
+        if callable(refresh):
+            try:
+                refresh(background=True)
+            except Exception:
+                pass
