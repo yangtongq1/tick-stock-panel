@@ -141,6 +141,14 @@ def _refresh_resources(request: Request) -> None:
     repo = getattr(request.app.state, "repo", None)
     if repo is not None and hasattr(repo, "clear_cache"):
         repo.clear_cache()
+        # 重建 live_agg (盘中递推状态) — 不重建则实时增量退化为当日从零起算,
+        # 连板天梯只剩 1 板 (2026-11-26 踩坑, 见 signals._invalidate 同修)
+        refresh = getattr(repo, "refresh_cache", None)
+        if callable(refresh):
+            try:
+                refresh(background=True)
+            except Exception:
+                pass
     monitor = getattr(request.app.state, "monitor_engine", None)
     if monitor is not None:
         monitor.invalidate_strategy_state()

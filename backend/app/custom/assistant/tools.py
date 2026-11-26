@@ -798,6 +798,14 @@ def _invalidate_custom_signals(data_dir: Path, repo: Any) -> None:
     strategy_cache.clear_cache(data_dir)
     if repo is not None and hasattr(repo, "clear_cache"):
         repo.clear_cache()
+        # 重建 live_agg (盘中递推状态) — 不重建则实时增量退化为当日从零起算,
+        # 连板天梯只剩 1 板 (2026-11-26 踩坑, 见 signals._invalidate 同修)
+        refresh = getattr(repo, "refresh_cache", None)
+        if callable(refresh):
+            try:
+                refresh(background=True)
+            except Exception:
+                pass
 
 
 _SIGNAL_FIELD_HINT = (
@@ -956,6 +964,12 @@ def _create_strategy(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         # 清缓存失败不影响已成功的落盘
         with contextlib.suppress(Exception):
             ctx.repo.clear_cache()
+        # 重建 live_agg (盘中递推状态) — 不重建则实时增量退化为当日从零起算,
+        # 连板天梯只剩 1 板 (2026-11-26 踩坑, 见 signals._invalidate 同修)
+        refresh = getattr(ctx.repo, "refresh_cache", None)
+        if callable(refresh):
+            with contextlib.suppress(Exception):
+                refresh(background=True)
 
     return {
         "created": True,

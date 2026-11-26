@@ -36,6 +36,15 @@ def _invalidate(request: Request) -> None:
     repo = request.app.state.repo
     if hasattr(repo, "clear_cache"):
         repo.clear_cache()
+        # clear_cache 连 live_agg (盘中递推状态, 含昨日连板数) 一起清; 不重建的话
+        # 实时增量路径退化为"当日从零起算", 连板天梯只剩 1 板 (2026-11-26 踩坑)。
+        # 后台线程重建 (约 20s), 完成后增量路径自动恢复。
+        refresh = getattr(repo, "refresh_cache", None)
+        if callable(refresh):
+            try:
+                refresh(background=True)
+            except Exception:
+                pass
 
 
 class ConditionModel(BaseModel):
