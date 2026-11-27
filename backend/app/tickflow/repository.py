@@ -1368,8 +1368,33 @@ class KlineRepository:
         # 验证缓存覆盖完整范围 (含 warmup)。lookback_days 是交易日语义, 用 ×2 日历日
         # 放宽确保覆盖 (节假日/周末), 与 warmup 60 一起留足余量。
         warmup_start = target_date - timedelta(days=(lookback_days + 60) * 2)
-        if cache_min > warmup_start or cache_max < target_date:
+        if cache_min > warmup_start:
             return None
+        if cache_max < target_date:
+            # 盘中场景: 历史缓存停在上一交易日 (启动预热/管道写入即止), 而目标
+            # 日期是今天 — 行情轮询每 6s 维护的 _enriched_cache 正好持有今天的
+            # 全指标实时行。用「历史缓存 + 今日实时行」拼接, 避免上层走
+            # 180 天 scan + compute_indicators 全量重算慢路径 (小内存机器上
+            # 会直接把整机拖进 swap 僵死, 2026-11-27 事故根因)。
+            # 历史日期查询 (target < 今天) 仍走原语义返回 None → 慢路径。
+            from app.market_time import cn_today
+            if cache_max < target_date and target_date == cn_today():
+                latest = self._enriched_cache
+                if (
+                    latest is not None
+                    and not latest.is_empty()
+                    and self._enriched_cache_date == target_date
+                    and "date" in latest.columns
+                ):
+                    today_rows = latest.filter(pl.col("date") == target_date)
+                    if not today_rows.is_empty():
+                        cache = pl.concat(
+                            [cache.filter(pl.col("date") != target_date), today_rows],
+                            how="diagonal_relaxed",
+                        ).sort(["symbol", "date"])
+                        cache_max = target_date
+            if cache_max < target_date:
+                return None
         # 按交易日计数裁剪: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日。
         # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口只有 ~N×5/7 个交易日,
         # 导致 filter_history 策略的滚动窗口/行号差(_gap)漏算, 与回测结果不一致。

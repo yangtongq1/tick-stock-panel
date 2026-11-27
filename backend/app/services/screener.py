@@ -309,6 +309,23 @@ class ScreenerService:
             del _history_cache[cache_key]
 
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
+        # 内存守卫 (2026-11-27 事故): 180 天 scan + 全指标重算在 3.6G 小机上峰值
+        # 可达 2G+, 与常驻缓存 (2.6G) 叠加直接把整机拖进 swap 僵死。可用内存
+        # 不足时拒绝进场, 返回空表让策略自行降级 (结果为空, 不炸机器)。
+        from app.services.memory_budget import memory_budget
+
+        try:
+            available_bytes = memory_budget().available_bytes
+        except Exception:  # noqa: BLE001
+            available_bytes = None
+        if available_bytes is not None and available_bytes < 1024**3:
+            logger.warning(
+                "_load_enriched_history(%s, %d): 内存不足 (%.2fG available < 1G), "
+                "跳过全量重算慢路径, 返回空表",
+                target_date, lookback_days, available_bytes / 1024**3,
+            )
+            return pl.DataFrame()
+
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
                        target_date, lookback_days)
         from app.indicators.pipeline import (

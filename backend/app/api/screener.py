@@ -799,6 +799,113 @@ def market_snapshot(request: Request):
     return {"as_of": str(as_of), "rows": rows}
 
 
+def _run_all_progressive_job(
+    handle,
+    repo,
+    engine,
+    svc: ScreenerService,
+    as_of,
+    asset_type: str,
+    timeframe: str,
+    ordered_ids: list[str],
+    params_map: dict,
+    overrides_map: dict,
+    version,
+    ensure: bool = False,
+) -> None:
+    """run_all 单飞执行器的 job 主体 (在 heavy-job exclusive 槽位内运行)。
+
+    含矩阵共建、逐策略执行、增量落盘与收尾重写。
+    """
+    data_dir = repo.store.data_dir
+    identity = screener_work.identity_for_inputs(repo, engine, asset_type, overrides_map)
+    screener_work.assert_current(repo, engine, asset_type, identity)
+    context = svc.build_strategy_context(
+        engine,
+        as_of,
+        ordered_ids,
+        timeframe=timeframe,
+        params_map=params_map,
+        overrides_map=overrides_map,
+    )
+    # 逐策略 run_all 不会把矩阵回写 context.market → 每个矩阵策略都会重建
+    # 全市场矩阵 (小服务器上单次数秒到十余秒)。这里按字段并集一次建好复用;
+    # FakeEngine 等无该方法的实现跳过 (保持旧行为)。
+    if getattr(context, "market", None) is None:
+        build_matrix = getattr(engine, "build_shared_matrix", None)
+        if callable(build_matrix):
+            matrix = build_matrix(
+                context,
+                [(sid, engine.get(sid)) for sid in ordered_ids],
+                params_map,
+                overrides_map,
+            )
+            if matrix is not None:
+                context = replace(context, market=matrix)
+    all_results: dict[str, dict] = {}
+    elapsed_map: dict[str, float] = {}
+    for sid in ordered_ids:
+        t0 = time.perf_counter()
+        # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
+        # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
+        try:
+            def compute(sid=sid):
+                single = engine.run_all(
+                    context, params_map=params_map, overrides_map=overrides_map,
+                    strategy_ids=[sid], parallel=False,
+                )
+                result = single[sid]
+                return {"total": result.total, "as_of": str(as_of),
+                        "rows": _safe(asdict(result)).get("rows", []),
+                        "computed_at": int(time.time() * 1000)}
+
+            payload = copy.deepcopy(screener_work.batch_results.run(
+                (identity, asset_type, timeframe, str(as_of), sid, version),
+                compute, ttl_s=6 if ensure else 0,
+            ))
+        except Exception as e:
+            logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
+            handle.fail_one(sid, str(e))
+            continue
+        screener_work.assert_current(repo, engine, asset_type, identity)
+        payload["available_at"] = int(time.time() * 1000)
+        if timeframe == "1d":
+            w = _coverage_warnings(
+                svc, as_of, engine=engine, strategy_ids=[sid],
+                params_map=params_map, overrides_map=overrides_map,
+            )
+            if w:
+                payload["warnings"] = w
+        all_results[sid] = payload
+        elapsed_map[sid] = (time.perf_counter() - t0) * 1000
+        # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到。
+        # 分钟结果不落盘 (strategy_cache 为日线语义), 改经 handle 快照合入 summary
+        if timeframe == "1d":
+            try:
+                strategy_cache.write_cache(
+                    data_dir, str(as_of), {sid: payload},
+                    validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
+                    strict=True,
+                )
+            except WorkBusyError:
+                raise
+            except Exception:  # noqa: BLE001 -- failed publication must not report availability
+                logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
+                all_results.pop(sid, None)
+                handle.fail_one(sid, "策略结果暂时无法保存，请稍后重试")
+                continue
+        handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
+    # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序 (分钟不落盘)
+    if all_results and timeframe == "1d":
+        screener_work.assert_current(repo, engine, asset_type, identity)
+        with contextlib.suppress(Exception):
+            strategy_cache.write_cache(
+                data_dir, str(as_of), all_results,
+                validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
+            )
+    strategy_run_queue.record_run_timings(data_dir, elapsed_map)
+
+
 def _run_all_progressive(
     *,
     repo,
@@ -829,91 +936,18 @@ def _run_all_progressive(
     )
 
     def job(handle: strategy_run_queue.StrategyRunHandle) -> None:
-        screener_work.assert_current(repo, engine, asset_type, identity)
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            ordered_ids,
-            timeframe=timeframe,
-            params_map=params_map,
-            overrides_map=overrides_map,
-        )
-        # 逐策略 run_all 不会把矩阵回写 context.market → 每个矩阵策略都会重建
-        # 全市场矩阵 (小服务器上单次数秒到十余秒)。这里按字段并集一次建好复用;
-        # FakeEngine 等无该方法的实现跳过 (保持旧行为)。
-        if getattr(context, "market", None) is None:
-            build_matrix = getattr(engine, "build_shared_matrix", None)
-            if callable(build_matrix):
-                matrix = build_matrix(
-                    context,
-                    [(sid, engine.get(sid)) for sid in ordered_ids],
-                    params_map,
-                    overrides_map,
-                )
-                if matrix is not None:
-                    context = replace(context, market=matrix)
-        all_results: dict[str, dict] = {}
-        elapsed_map: dict[str, float] = {}
-        for sid in ordered_ids:
-            t0 = time.perf_counter()
-            # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
-            # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
-            try:
-                def compute(sid=sid):
-                    single = engine.run_all(
-                        context, params_map=params_map, overrides_map=overrides_map,
-                        strategy_ids=[sid], parallel=False,
-                    )
-                    result = single[sid]
-                    return {"total": result.total, "as_of": str(as_of),
-                            "rows": _safe(asdict(result)).get("rows", []),
-                            "computed_at": int(time.time() * 1000)}
+        # 重任务准入 + 互斥 (2026-11-27 事故): run_all 的 filter_history 策略会经
+        # _load_enriched_history 慢路径触发 180 天 scan + compute_indicators 全量
+        # 重算, 在小内存机器 (3.6G) 上直接把整机拖进 swap 僵死。与 /run 共享
+        # exclusive 槽位互斥, 并复用内存准入 (可用 <1G 时挂起等待恢复, 而非
+        # 带着高压内存进场把整机压垮)。
+        from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
-                payload = copy.deepcopy(screener_work.batch_results.run(
-                    (identity, asset_type, timeframe, str(as_of), sid, version),
-                    compute, ttl_s=6 if ensure else 0,
-                ))
-            except Exception as e:
-                logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
-                handle.fail_one(sid, str(e))
-                continue
-            screener_work.assert_current(repo, engine, asset_type, identity)
-            payload["available_at"] = int(time.time() * 1000)
-            if timeframe == "1d":
-                w = _coverage_warnings(
-                    svc, as_of, engine=engine, strategy_ids=[sid],
-                    params_map=params_map, overrides_map=overrides_map,
-                )
-                if w:
-                    payload["warnings"] = w
-            all_results[sid] = payload
-            elapsed_map[sid] = (time.perf_counter() - t0) * 1000
-            # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到。
-            # 分钟结果不落盘 (strategy_cache 为日线语义), 改经 handle 快照合入 summary
-            if timeframe == "1d":
-                try:
-                    strategy_cache.write_cache(
-                        data_dir, str(as_of), {sid: payload},
-                        validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
-                        strict=True,
-                    )
-                except WorkBusyError:
-                    raise
-                except Exception:  # noqa: BLE001 -- failed publication must not report availability
-                    logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
-                    all_results.pop(sid, None)
-                    handle.fail_one(sid, "策略结果暂时无法保存，请稍后重试")
-                    continue
-            handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
-        # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序 (分钟不落盘)
-        if all_results and timeframe == "1d":
-            screener_work.assert_current(repo, engine, asset_type, identity)
-            with contextlib.suppress(Exception):
-                strategy_cache.write_cache(
-                    data_dir, str(as_of), all_results,
-                    validate=lambda: screener_work.assert_current(repo, engine, asset_type, identity),
-                )
-        strategy_run_queue.record_run_timings(data_dir, elapsed_map)
+        with shared_heavy_job_limiter.slot("exclusive"):
+            _run_all_progressive_job(
+                handle, repo, engine, svc, as_of, asset_type, timeframe,
+                ordered_ids, params_map, overrides_map, version, ensure,
+            )
 
     handle = strategy_run_queue.MANAGER.get_or_submit(
         key, ordered_ids, job, reuse_completed_ms=6000 if ensure else 0, source_version=version, on_submit=on_submit,
